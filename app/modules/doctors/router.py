@@ -35,6 +35,8 @@ async def list_doctors(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     company_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search: name/phone")] = None,
+    location_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = DoctorsService()
@@ -42,6 +44,8 @@ async def list_doctors(
         db,
         current,
         company_id_query=company_id,
+        q=q,
+        location_id=location_id,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
@@ -90,3 +94,18 @@ async def update_doctor(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     return ok(data=row.model_dump(mode="json"), message="Updated")
+
+
+@router.delete("/{doctor_id}")
+async def delete_doctor(
+    doctor_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    try:
+        row = await DoctorsService().delete_doctor(db, current, doctor_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return ok(data=row.model_dump(mode="json"), message="Deleted")

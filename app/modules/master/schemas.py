@@ -36,10 +36,12 @@ class StateOut(BaseModel):
 class DivisionCreate(BaseModel):
     company_id: uuid.UUID
     name: str = Field(..., min_length=1, max_length=255)
+    code: str = Field(..., min_length=1, max_length=50)
 
 
 class DivisionUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
+    code: str | None = Field(None, max_length=50)
     is_active: bool | None = None
 
 
@@ -49,6 +51,7 @@ class DivisionOut(BaseModel):
     id: uuid.UUID
     company_id: uuid.UUID
     name: str
+    code: str | None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -61,10 +64,12 @@ class HeadquarterCreate(BaseModel):
     state_id: uuid.UUID
     division_id: uuid.UUID
     name: str = Field(..., min_length=1, max_length=255)
+    code: str = Field(..., min_length=1, max_length=50)
 
 
 class HeadquarterUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
+    code: str | None = Field(None, max_length=50)
     is_active: bool | None = None
 
 
@@ -75,6 +80,7 @@ class HeadquarterOut(BaseModel):
     state_id: uuid.UUID
     division_id: uuid.UUID
     name: str
+    code: str | None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -86,10 +92,12 @@ class HeadquarterOut(BaseModel):
 class LocationCreate(BaseModel):
     headquarter_id: uuid.UUID
     name: str = Field(..., min_length=1, max_length=255)
+    code: str = Field(..., min_length=1, max_length=50)
 
 
 class LocationUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
+    code: str | None = Field(None, max_length=50)
     is_active: bool | None = None
 
 
@@ -99,6 +107,7 @@ class LocationOut(BaseModel):
     id: uuid.UUID
     headquarter_id: uuid.UUID
     name: str
+    code: str | None
     is_active: bool
     created_at: datetime
     updated_at: datetime

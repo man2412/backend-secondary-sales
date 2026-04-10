@@ -271,13 +271,10 @@ All fields optional (send only what changes):
   ],
   "medical_stores": [
     {
-      "mr_doctor_allocation_id": "uuid",
-      "doctor_id": "uuid",
-      "doctor_name": "string or null",
-      "division_id": "uuid",
-      "division_name": "string or null",
       "medical_store_id": "uuid",
       "store_name": "string or null",
+      "id": "uuid",
+      "mr_id": "uuid",
       "allocated_by": "uuid",
       "allocated_at": "...",
       "is_active": true
@@ -606,7 +603,8 @@ Required: `company_id`, `name`. **Response `200`:** `data` = `StateOut`, `messag
 ```json
 {
   "company_id": "uuid",
-  "name": "Division name"
+  "name": "Division name",
+  "code": "DIV-001"
 }
 ```
 
@@ -614,7 +612,7 @@ Required: `company_id`, `name`. **Response `200`:** `data` = `StateOut`, `messag
 
 ### `PUT /v1/divisions/{division_id}`
 
-**Body:** optional `name`, `is_active`. **Response `200`:** `data` = `DivisionOut`.
+**Body:** optional `name`, `code`, `is_active`. **Response `200`:** `data` = `DivisionOut`.
 
 ---
 
@@ -628,7 +626,8 @@ Required: `company_id`, `name`. **Response `200`:** `data` = `StateOut`, `messag
 {
   "state_id": "uuid",
   "division_id": "uuid",
-  "name": "HQ name"
+  "name": "HQ name",
+  "code": "HQ-001"
 }
 ```
 
@@ -636,7 +635,7 @@ Required: `company_id`, `name`. **Response `200`:** `data` = `StateOut`, `messag
 
 ### `PUT /v1/headquarters/{hq_id}`
 
-**Body:** optional `name`, `is_active`. **Response `200`:** `data` = `HeadquarterOut`.
+**Body:** optional `name`, `code`, `is_active`. **Response `200`:** `data` = `HeadquarterOut`.
 
 ---
 
@@ -649,7 +648,8 @@ Required: `company_id`, `name`. **Response `200`:** `data` = `StateOut`, `messag
 ```json
 {
   "headquarter_id": "uuid",
-  "name": "Location name"
+  "name": "Location name",
+  "code": "LOC-001"
 }
 ```
 
@@ -657,7 +657,7 @@ Required: `company_id`, `name`. **Response `200`:** `data` = `StateOut`, `messag
 
 ### `PUT /v1/locations/{location_id}`
 
-**Body:** optional `name`, `is_active`. **Response `200`:** `data` = `LocationOut`.
+**Body:** optional `name`, `code`, `is_active`. **Response `200`:** `data` = `LocationOut`.
 
 ---
 
@@ -779,7 +779,7 @@ Base: **`/v1/doctors`**.
 ## 8. MR allocations
 
 Base: **`/v1/allocations`**.  
-Medical stores for an MR are **not** allocated directly; they appear in the bundle via **doctor allocations × doctor `medical_store_ids`**.
+Medical stores for an MR are allocated directly under the MR.
 
 **Who may POST/DELETE allocations:** management roles only (**not** MR). See **`docs/RBAC.md`**.
 
@@ -812,64 +812,26 @@ Medical stores for an MR are **not** allocated directly; they appear in the bund
 
 ---
 
-### `POST /v1/allocations/mr/{mr_id}/locations`
+### `PUT /v1/allocations/mr/{mr_id}` (single allocations API)
 
-**Body**
+Use this endpoint to **add/remove** locations, doctors, medical stores, and products in one request.
 
-```json
-{ "location_id": "uuid" }
-```
-
-**Response `200`:** `data` = one `LocationAllocOut` object (see bundle `locations[]` shape in [§2.8](#28-allocationsbundleout-get-v1allocationsmrmr_id--data)), `message` e.g. `"Allocated"`.
-
----
-
-### `POST /v1/allocations/mr/{mr_id}/doctors`
-
-**Body**
+**Body** (`AllocationOps`)
 
 ```json
 {
-  "doctor_id": "uuid",
-  "division_id": "uuid"
+  "add_locations": ["uuid"],
+  "remove_location_alloc_ids": ["uuid"],
+  "add_doctors": [{ "doctor_id": "uuid", "division_id": "uuid" }],
+  "remove_doctor_alloc_ids": ["uuid"],
+  "add_stores": ["uuid"],
+  "remove_store_alloc_ids": ["uuid"],
+  "add_products": ["uuid"],
+  "remove_product_alloc_ids": ["uuid"]
 }
 ```
 
-**Response `200`:** `data` = one `DoctorAllocOut` (bundle `doctors[]` item shape).
-
----
-
-### `POST /v1/allocations/mr/{mr_id}/products`
-
-**Body**
-
-```json
-{ "product_id": "uuid" }
-```
-
-**Response `200`:** `data` = one `ProductAllocOut`.
-
----
-
-### `DELETE /v1/allocations/locations/{alloc_id}`
-
-### `DELETE /v1/allocations/doctors/{alloc_id}`
-
-### `DELETE /v1/allocations/products/{alloc_id}`
-
-| **Path** | `alloc_id` = allocation row `id` |
-| **Body** | None |
-
-**Response `200`**
-
-```json
-{
-  "success": true,
-  "message": "Allocation removed"
-}
-```
-
-(`data` typically omitted / null)
+**Response `200`**: returns the updated `AllocationsBundleOut` as `data`.
 
 ---
 
@@ -1009,6 +971,35 @@ Soft-deletes the sale (`is_active: false`).
 
 ---
 
+### `POST /v1/secondary-sales/import`
+
+Uploads an **Excel (`.xlsx`) or PDF (`.pdf`)** and inserts rows into secondary sales.
+
+| | |
+|--|--|
+| **Auth** | Bearer + **SUPER_ADMIN** |
+| **Body** | `multipart/form-data` with field `file` |
+
+**Expected table columns (headers)**: `mr_id`, `product_id`, `location_id`, `sale_date`, `sale_qty`, optional `free_qty`, `doctor_id`, `medical_store_id`, `special_price`, `remarks`.
+
+**Response `200`**
+
+```json
+{
+  "success": true,
+  "message": "Import complete",
+  "data": {
+    "created": 10,
+    "failed": 2,
+    "errors": [
+      { "row": 3, "error": "Sale qty must be at least 1", "data": {} }
+    ]
+  }
+}
+```
+
+---
+
 ## 10. Reports — secondary sales analytics
 
 ---
@@ -1139,18 +1130,15 @@ For **`pie`** including **`rsm`** or **`asm`**, **SUPER_ADMIN** must pass **`com
 | GET | `/v1/doctors/{doctor_id}` |
 | POST | `/v1/doctors` |
 | PUT | `/v1/doctors/{doctor_id}` |
+| DELETE | `/v1/doctors/{doctor_id}` |
 | GET | `/v1/allocations/mr/{mr_id}` |
-| POST | `/v1/allocations/mr/{mr_id}/locations` |
-| POST | `/v1/allocations/mr/{mr_id}/doctors` |
-| POST | `/v1/allocations/mr/{mr_id}/products` |
-| DELETE | `/v1/allocations/locations/{alloc_id}` |
-| DELETE | `/v1/allocations/doctors/{alloc_id}` |
-| DELETE | `/v1/allocations/products/{alloc_id}` |
+| PUT | `/v1/allocations/mr/{mr_id}` |
 | GET | `/v1/secondary-sales` |
 | GET | `/v1/secondary-sales/{sale_id}` |
 | POST | `/v1/secondary-sales` |
 | PUT | `/v1/secondary-sales/{sale_id}` |
 | DELETE | `/v1/secondary-sales/{sale_id}` |
+| POST | `/v1/secondary-sales/import` |
 | GET | `/v1/reports/secondary-sales/analytics` |
 
 ---

@@ -2,7 +2,7 @@ from typing import Annotated
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_roles
@@ -12,6 +12,7 @@ from app.core.responses import PaginationMeta, ok
 from app.models.user import User
 from app.modules.sales.schemas import SecondarySaleCreate, SecondarySaleOut, SecondarySaleUpdate
 from app.modules.sales.service import SalesService
+from app.modules.sales.importer import parse_secondary_sales_pdf, parse_secondary_sales_xlsx
 
 router = APIRouter(prefix="/secondary-sales", tags=["secondary-sales"])
 
@@ -107,3 +108,45 @@ async def delete_secondary_sale(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     return ok(message="Sale removed")
+
+
+@router.post("/import")
+async def import_secondary_sales(
+    file: Annotated[UploadFile, File(description="Upload .xlsx or .pdf")],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(require_roles(UserRole.SUPER_ADMIN))],
+) -> dict:
+    content = await file.read()
+    name = (file.filename or "").lower()
+    try:
+        if name.endswith(".xlsx"):
+            rows = parse_secondary_sales_xlsx(content)
+        elif name.endswith(".pdf"):
+            rows = parse_secondary_sales_pdf(content)
+        else:
+            raise ValueError("Only .xlsx and .pdf are supported")
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Could not parse file: {e}") from e
+
+    created = 0
+    errors: list[dict] = []
+    svc = SalesService()
+    for i, r in enumerate(rows, start=1):
+        try:
+            body = SecondarySaleCreate(
+                mr_id=r.get("mr_id"),
+                product_id=r["product_id"],
+                doctor_id=r.get("doctor_id"),
+                medical_store_id=r.get("medical_store_id"),
+                location_id=r["location_id"],
+                sale_date=r["sale_date"],
+                sale_qty=r["sale_qty"],
+                free_qty=r.get("free_qty", 0),
+                special_price=r.get("special_price"),
+                remarks=r.get("remarks"),
+            )
+            await svc.create_sale(db, current, body)
+            created += 1
+        except Exception as e:
+            errors.append({"row": i, "error": str(e), "data": r})
+    return ok(data={"created": created, "failed": len(errors), "errors": errors}, message="Import complete")

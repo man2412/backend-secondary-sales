@@ -7,13 +7,15 @@ from app.models.user import User
 from app.modules.allocations.repository import AllocationsRepository
 from app.modules.allocations.schemas import (
     AllocationsBundleOut,
+    AllocationOps,
     DoctorAllocCreate,
     DoctorAllocOut,
     LocationAllocCreate,
     LocationAllocOut,
-    MedicalStoreViaDoctorOut,
     ProductAllocCreate,
     ProductAllocOut,
+    StoreAllocCreate,
+    StoreAllocOut,
 )
 from app.modules.doctors.repository import DoctorsRepository
 from app.modules.master.repository import MasterRepository
@@ -64,7 +66,7 @@ class AllocationsService:
         active_only = not include_inactive
         locs = await self._repo.list_location_alloc_rows(db, mr_id, active_only)
         docs = await self._repo.list_doctor_alloc_rows(db, mr_id, active_only)
-        store_rows = await self._repo.list_medical_stores_via_allocated_doctors(db, mr_id, active_only)
+        stores = await self._repo.list_store_alloc_rows(db, mr_id, active_only)
         prods = await self._repo.list_product_alloc_rows(db, mr_id, active_only)
 
         loc_out: list[LocationAllocOut] = []
@@ -95,28 +97,17 @@ class AllocationsService:
                     is_active=a.is_active,
                 )
             )
-        st_out: list[MedicalStoreViaDoctorOut] = []
-        for (
-            alloc_id,
-            doctor_id,
-            division_id,
-            medical_store_id,
-            allocated_by,
-            allocated_at,
-            is_active,
-        ) in store_rows:
+        st_out: list[StoreAllocOut] = []
+        for a in stores:
             st_out.append(
-                MedicalStoreViaDoctorOut(
-                    mr_doctor_allocation_id=alloc_id,
-                    doctor_id=doctor_id,
-                    doctor_name=await self._repo.doctor_name(db, doctor_id),
-                    division_id=division_id,
-                    division_name=await self._repo.division_name(db, division_id),
-                    medical_store_id=medical_store_id,
-                    store_name=await self._repo.store_name(db, medical_store_id),
-                    allocated_by=allocated_by,
-                    allocated_at=allocated_at,
-                    is_active=is_active,
+                StoreAllocOut(
+                    id=a.id,
+                    mr_id=a.mr_id,
+                    medical_store_id=a.medical_store_id,
+                    store_name=await self._repo.store_name(db, a.medical_store_id),
+                    allocated_by=a.allocated_by,
+                    allocated_at=a.allocated_at,
+                    is_active=a.is_active,
                 )
             )
         pr_out: list[ProductAllocOut] = []
@@ -216,6 +207,27 @@ class AllocationsService:
             is_active=row.is_active,
         )
 
+    async def add_store(self, db: AsyncSession, user: User, mr_id: uuid.UUID, body: StoreAllocCreate) -> StoreAllocOut:
+        self._require_can_manage_allocations(user)
+        mr = await self._require_view_mr(db, user, mr_id)
+        st = await self._stockists.get_medical_store(db, body.medical_store_id)
+        if st is None or not st.is_active:
+            raise ValueError("Medical store not found")
+        if st.company_id != mr.company_id:
+            raise ValueError("Medical store not in MR company")
+        row = await self._repo.upsert_store_alloc(
+            db, mr_id=mr_id, medical_store_id=body.medical_store_id, allocated_by=user.id
+        )
+        return StoreAllocOut(
+            id=row.id,
+            mr_id=row.mr_id,
+            medical_store_id=row.medical_store_id,
+            store_name=await self._repo.store_name(db, row.medical_store_id),
+            allocated_by=row.allocated_by,
+            allocated_at=row.allocated_at,
+            is_active=row.is_active,
+        )
+
     async def delete_location(self, db: AsyncSession, user: User, alloc_id: uuid.UUID) -> None:
         self._require_can_manage_allocations(user)
         row = await self._repo.get_location_alloc(db, alloc_id)
@@ -239,3 +251,38 @@ class AllocationsService:
             raise ValueError("Allocation not found")
         await self._require_view_mr(db, user, row.mr_id)
         await self._repo.soft_delete_product(db, row)
+
+    async def delete_store(self, db: AsyncSession, user: User, alloc_id: uuid.UUID) -> None:
+        self._require_can_manage_allocations(user)
+        row = await self._repo.get_store_alloc(db, alloc_id)
+        if row is None:
+            raise ValueError("Allocation not found")
+        await self._require_view_mr(db, user, row.mr_id)
+        await self._repo.soft_delete_store(db, row)
+
+    async def apply_ops(self, db: AsyncSession, user: User, mr_id: uuid.UUID, ops: AllocationOps) -> AllocationsBundleOut:
+        """Single endpoint to add/remove allocations for an MR."""
+        self._require_can_manage_allocations(user)
+        await self._require_view_mr(db, user, mr_id)
+
+        for lid in ops.add_locations:
+            await self.add_location(db, user, mr_id, LocationAllocCreate(location_id=lid))
+        for did in ops.remove_location_alloc_ids:
+            await self.delete_location(db, user, did)
+
+        for d in ops.add_doctors:
+            await self.add_doctor(db, user, mr_id, d)
+        for did in ops.remove_doctor_alloc_ids:
+            await self.delete_doctor(db, user, did)
+
+        for sid in ops.add_stores:
+            await self.add_store(db, user, mr_id, StoreAllocCreate(medical_store_id=sid))
+        for sid in ops.remove_store_alloc_ids:
+            await self.delete_store(db, user, sid)
+
+        for pid in ops.add_products:
+            await self.add_product(db, user, mr_id, ProductAllocCreate(product_id=pid))
+        for pid in ops.remove_product_alloc_ids:
+            await self.delete_product(db, user, pid)
+
+        return await self.get_bundle(db, user, mr_id, include_inactive=True)

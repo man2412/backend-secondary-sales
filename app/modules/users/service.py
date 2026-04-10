@@ -59,22 +59,21 @@ class UserService:
         user: User,
         *,
         company_id_query: uuid.UUID | None,
+        q: str | None,
         page: int,
         per_page: int,
         include_inactive: bool,
     ) -> tuple[list[User], int]:
-        if user.role == UserRole.MR:
-            raise PermissionError("MR cannot list company users")
-        if user.role == UserRole.SUPER_ADMIN:
-            if company_id_query is None:
-                raise ValueError("company_id is required for SUPER_ADMIN")
-            company_id = company_id_query
-        else:
-            company_id = user.company_id
+        if user.role != UserRole.SUPER_ADMIN:
+            raise PermissionError("Only SUPER_ADMIN can list company users")
+        if company_id_query is None:
+            raise ValueError("company_id is required for SUPER_ADMIN")
+        company_id = company_id_query
         offset = (page - 1) * per_page
         rows, total = await self._repo.list_users(
             db,
             company_id=company_id,
+            q=q,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,
@@ -103,3 +102,13 @@ class UserService:
                 if mgr.id == target.id:
                     raise ValueError("Cannot report to self")
         return await self._repo.patch_user(db, target, data)
+
+    async def delete_user(self, db: AsyncSession, actor: User, target_id: uuid.UUID) -> User:
+        if actor.role != UserRole.SUPER_ADMIN:
+            raise PermissionError("Only SUPER_ADMIN can delete users")
+        target = await self._repo.get_by_id(db, target_id)
+        if target is None:
+            raise ValueError("User not found")
+        if not target.is_active:
+            return target
+        return await self._repo.patch_user(db, target, {"is_active": False})

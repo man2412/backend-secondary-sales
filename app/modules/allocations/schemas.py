@@ -26,14 +26,9 @@ class DoctorAllocOut(BaseModel):
     is_active: bool
 
 
-class MedicalStoreViaDoctorOut(BaseModel):
-    """Store reachable for the MR via an allocated doctor (doctor_medical_stores), not a direct MR–store row."""
-
-    mr_doctor_allocation_id: uuid.UUID
-    doctor_id: uuid.UUID
-    doctor_name: str | None
-    division_id: uuid.UUID
-    division_name: str | None
+class StoreAllocOut(BaseModel):
+    id: uuid.UUID
+    mr_id: uuid.UUID
     medical_store_id: uuid.UUID
     store_name: str | None
     allocated_by: uuid.UUID
@@ -54,7 +49,7 @@ class ProductAllocOut(BaseModel):
 class AllocationsBundleOut(BaseModel):
     locations: list[LocationAllocOut]
     doctors: list[DoctorAllocOut]
-    medical_stores: list[MedicalStoreViaDoctorOut]
+    medical_stores: list[StoreAllocOut]
     products: list[ProductAllocOut]
 
 
@@ -67,5 +62,20 @@ class DoctorAllocCreate(BaseModel):
     division_id: uuid.UUID
 
 
+class StoreAllocCreate(BaseModel):
+    medical_store_id: uuid.UUID
+
+
 class ProductAllocCreate(BaseModel):
     product_id: uuid.UUID
+
+
+class AllocationOps(BaseModel):
+    add_locations: list[uuid.UUID] = []
+    remove_location_alloc_ids: list[uuid.UUID] = []
+    add_doctors: list[DoctorAllocCreate] = []
+    remove_doctor_alloc_ids: list[uuid.UUID] = []
+    add_stores: list[uuid.UUID] = []
+    remove_store_alloc_ids: list[uuid.UUID] = []
+    add_products: list[uuid.UUID] = []
+    remove_product_alloc_ids: list[uuid.UUID] = []

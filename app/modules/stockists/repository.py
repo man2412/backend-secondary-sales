@@ -4,8 +4,7 @@ from collections.abc import Sequence
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.allocation import MrDoctorAllocation
-from app.models.doctor import DoctorMedicalStore
+from app.models.allocation import MrStoreAllocation
 from app.models.master import Headquarter, Location, State
 from app.models.stockist import MedicalStore, Stockist, SuperStockist
 
@@ -33,6 +32,8 @@ class StockistsRepository:
         db: AsyncSession,
         *,
         company_id: uuid.UUID | None,
+        q: str | None,
+        location_id: uuid.UUID | None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -45,6 +46,23 @@ class StockistsRepository:
         if active_only:
             base = base.where(SuperStockist.is_active.is_(True))
             count_q = count_q.where(SuperStockist.is_active.is_(True))
+        if location_id is not None:
+            base = base.where(SuperStockist.location_id == location_id)
+            count_q = count_q.where(SuperStockist.location_id == location_id)
+        if q is not None and q.strip():
+            term = f"%{q.strip()}%"
+            base = base.where(
+                (SuperStockist.name.ilike(term))
+                | (SuperStockist.gst_number.ilike(term))
+                | (SuperStockist.pan.ilike(term))
+                | (SuperStockist.unique_code.ilike(term))
+            )
+            count_q = count_q.where(
+                (SuperStockist.name.ilike(term))
+                | (SuperStockist.gst_number.ilike(term))
+                | (SuperStockist.pan.ilike(term))
+                | (SuperStockist.unique_code.ilike(term))
+            )
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(SuperStockist.name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()
@@ -124,6 +142,9 @@ class StockistsRepository:
         db: AsyncSession,
         *,
         company_id: uuid.UUID | None,
+        q: str | None,
+        super_stockist_id: uuid.UUID | None,
+        location_id: uuid.UUID | None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -136,6 +157,26 @@ class StockistsRepository:
         if active_only:
             base = base.where(Stockist.is_active.is_(True))
             count_q = count_q.where(Stockist.is_active.is_(True))
+        if super_stockist_id is not None:
+            base = base.where(Stockist.super_stockist_id == super_stockist_id)
+            count_q = count_q.where(Stockist.super_stockist_id == super_stockist_id)
+        if location_id is not None:
+            base = base.where(Stockist.location_id == location_id)
+            count_q = count_q.where(Stockist.location_id == location_id)
+        if q is not None and q.strip():
+            term = f"%{q.strip()}%"
+            base = base.where(
+                (Stockist.name.ilike(term))
+                | (Stockist.gst_number.ilike(term))
+                | (Stockist.pan.ilike(term))
+                | (Stockist.unique_code.ilike(term))
+            )
+            count_q = count_q.where(
+                (Stockist.name.ilike(term))
+                | (Stockist.gst_number.ilike(term))
+                | (Stockist.pan.ilike(term))
+                | (Stockist.unique_code.ilike(term))
+            )
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(Stockist.name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()
@@ -220,6 +261,9 @@ class StockistsRepository:
         db: AsyncSession,
         *,
         company_id: uuid.UUID | None,
+        q: str | None,
+        stockist_id: uuid.UUID | None,
+        location_id: uuid.UUID | None,
         active_only: bool,
         mr_id: uuid.UUID | None,
         limit: int,
@@ -233,19 +277,33 @@ class StockistsRepository:
         if active_only:
             base = base.where(MedicalStore.is_active.is_(True))
             count_q = count_q.where(MedicalStore.is_active.is_(True))
+        if stockist_id is not None:
+            base = base.where(MedicalStore.stockist_id == stockist_id)
+            count_q = count_q.where(MedicalStore.stockist_id == stockist_id)
+        if location_id is not None:
+            base = base.where(MedicalStore.location_id == location_id)
+            count_q = count_q.where(MedicalStore.location_id == location_id)
         if mr_id is not None:
-            subq = (
-                select(DoctorMedicalStore.medical_store_id)
-                .select_from(MrDoctorAllocation)
-                .join(DoctorMedicalStore, DoctorMedicalStore.doctor_id == MrDoctorAllocation.doctor_id)
-                .where(
-                    MrDoctorAllocation.mr_id == mr_id,
-                    MrDoctorAllocation.is_active.is_(True),
-                )
-                .distinct()
+            subq = select(MrStoreAllocation.medical_store_id).where(
+                MrStoreAllocation.mr_id == mr_id,
+                MrStoreAllocation.is_active.is_(True),
             )
             base = base.where(MedicalStore.id.in_(subq))
             count_q = count_q.where(MedicalStore.id.in_(subq))
+        if q is not None and q.strip():
+            term = f"%{q.strip()}%"
+            base = base.where(
+                (MedicalStore.name.ilike(term))
+                | (MedicalStore.gst_number.ilike(term))
+                | (MedicalStore.pan.ilike(term))
+                | (MedicalStore.unique_code.ilike(term))
+            )
+            count_q = count_q.where(
+                (MedicalStore.name.ilike(term))
+                | (MedicalStore.gst_number.ilike(term))
+                | (MedicalStore.pan.ilike(term))
+                | (MedicalStore.unique_code.ilike(term))
+            )
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(MedicalStore.name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()

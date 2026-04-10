@@ -50,6 +50,8 @@ class DoctorsRepository:
         db: AsyncSession,
         *,
         company_id: uuid.UUID | None,
+        q: str | None,
+        location_id: uuid.UUID | None,
         active_only: bool,
         mr_id: uuid.UUID | None,
         limit: int,
@@ -63,6 +65,9 @@ class DoctorsRepository:
         if active_only:
             base = base.where(Doctor.is_active.is_(True))
             count_q = count_q.where(Doctor.is_active.is_(True))
+        if location_id is not None:
+            base = base.where(Doctor.location_id == location_id)
+            count_q = count_q.where(Doctor.location_id == location_id)
         if mr_id is not None:
             subq = select(MrDoctorAllocation.doctor_id).where(
                 MrDoctorAllocation.mr_id == mr_id,
@@ -70,6 +75,10 @@ class DoctorsRepository:
             )
             base = base.where(Doctor.id.in_(subq))
             count_q = count_q.where(Doctor.id.in_(subq))
+        if q is not None and q.strip():
+            term = f"%{q.strip()}%"
+            base = base.where((Doctor.full_name.ilike(term)) | (Doctor.phone.ilike(term)))
+            count_q = count_q.where((Doctor.full_name.ilike(term)) | (Doctor.phone.ilike(term)))
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(Doctor.full_name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()

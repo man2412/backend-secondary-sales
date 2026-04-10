@@ -74,12 +74,27 @@ class UserRepository:
         db: AsyncSession,
         *,
         company_id: uuid.UUID,
+        q: str | None,
         active_only: bool,
         limit: int,
         offset: int,
     ) -> tuple[Sequence[User], int]:
         base = select(User).where(User.company_id == company_id)
         count_q = select(func.count()).select_from(User).where(User.company_id == company_id)
+        if q is not None and q.strip():
+            term = f"%{q.strip()}%"
+            base = base.where(
+                (User.full_name.ilike(term))
+                | (User.email.ilike(term))
+                | (User.phone.ilike(term))
+                | (User.employee_code.ilike(term))
+            )
+            count_q = count_q.where(
+                (User.full_name.ilike(term))
+                | (User.email.ilike(term))
+                | (User.phone.ilike(term))
+                | (User.employee_code.ilike(term))
+            )
         if active_only:
             base = base.where(User.is_active.is_(True))
             count_q = count_q.where(User.is_active.is_(True))
@@ -87,6 +102,42 @@ class UserRepository:
         base = base.order_by(User.full_name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()
         return rows, int(total)
+
+    async def reporting_chain(self, db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
+        """Chain from user -> reports_to -> ... until top (active/inactive included)."""
+        q = text(
+            """
+            WITH RECURSIVE chain AS (
+                SELECT id, full_name, email, role, reports_to, 0 AS depth
+                FROM users
+                WHERE id = :uid
+                UNION ALL
+                SELECT u.id, u.full_name, u.email, u.role, u.reports_to, c.depth + 1
+                FROM users u
+                INNER JOIN chain c ON c.reports_to = u.id
+            )
+            SELECT id, full_name, email, role, reports_to, depth
+            FROM chain
+            ORDER BY depth
+            """
+        )
+        r = await db.execute(q, {"uid": str(user_id)})
+        out: list[dict] = []
+        for row in r.mappings():
+            role = row["role"]
+            role_str = role.value if hasattr(role, "value") else str(role)
+            rto = row["reports_to"]
+            out.append(
+                {
+                    "id": str(row["id"]),
+                    "full_name": row["full_name"],
+                    "email": row["email"],
+                    "role": role_str,
+                    "reports_to": str(rto) if rto is not None else None,
+                    "depth": int(row["depth"]),
+                }
+            )
+        return out
 
     async def patch_user(self, db: AsyncSession, user: User, patch: dict) -> User:
         if "division_id" in patch:

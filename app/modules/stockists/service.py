@@ -50,6 +50,8 @@ class StockistsService:
         user: User,
         *,
         company_id_query: uuid.UUID | None,
+        q: str | None,
+        location_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -59,6 +61,8 @@ class StockistsService:
         rows, total = await self._repo.list_super_stockists(
             db,
             company_id=scope,
+            q=q,
+            location_id=location_id,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,
@@ -124,6 +128,9 @@ class StockistsService:
         user: User,
         *,
         company_id_query: uuid.UUID | None,
+        q: str | None,
+        super_stockist_id: uuid.UUID | None,
+        location_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -133,6 +140,9 @@ class StockistsService:
         rows, total = await self._repo.list_stockists(
             db,
             company_id=scope,
+            q=q,
+            super_stockist_id=super_stockist_id,
+            location_id=location_id,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,
@@ -220,6 +230,9 @@ class StockistsService:
         user: User,
         *,
         company_id_query: uuid.UUID | None,
+        q: str | None,
+        stockist_id: uuid.UUID | None,
+        location_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -230,12 +243,78 @@ class StockistsService:
         rows, total = await self._repo.list_medical_stores(
             db,
             company_id=scope,
+            q=q,
+            stockist_id=stockist_id,
+            location_id=location_id,
             active_only=not include_inactive,
             mr_id=mr_filter,
             limit=per_page,
             offset=offset,
         )
         return list(rows), total
+
+    async def delete_super_stockist(self, db: AsyncSession, user: User, entity_id: uuid.UUID):
+        self._ensure_super_admin(user)
+        row = await self._repo.get_super_stockist(db, entity_id)
+        if row is None:
+            raise ValueError("Super stockist not found")
+        scope = self._scope_single(user)
+        if scope is not None and row.company_id != scope:
+            raise ValueError("Super stockist not found")
+        return await self._repo.update_super_stockist(
+            db,
+            row,
+            name=None,
+            unique_code=None,
+            gst_number=None,
+            drug_licence=None,
+            pan=None,
+            address=None,
+            location_id=None,
+            is_active=False,
+        )
+
+    async def delete_stockist(self, db: AsyncSession, user: User, entity_id: uuid.UUID):
+        self._ensure_super_admin(user)
+        row = await self._repo.get_stockist(db, entity_id)
+        if row is None:
+            raise ValueError("Stockist not found")
+        scope = self._scope_single(user)
+        if scope is not None and row.company_id != scope:
+            raise ValueError("Stockist not found")
+        return await self._repo.update_stockist(
+            db,
+            row,
+            super_stockist_id=None,
+            name=None,
+            unique_code=None,
+            gst_number=None,
+            drug_licence=None,
+            pan=None,
+            address=None,
+            location_id=None,
+            is_active=False,
+        )
+
+    async def delete_medical_store(self, db: AsyncSession, user: User, entity_id: uuid.UUID):
+        row = await self._repo.get_medical_store(db, entity_id)
+        if row is None:
+            raise ValueError("Medical store not found")
+        if not self._can_touch_medical_store(user, row.company_id):
+            raise PermissionError("Medical store not in your company")
+        return await self._repo.update_medical_store(
+            db,
+            row,
+            stockist_id=None,
+            name=None,
+            unique_code=None,
+            gst_number=None,
+            drug_licence=None,
+            pan=None,
+            address=None,
+            location_id=None,
+            is_active=False,
+        )
 
     async def get_medical_store(self, db: AsyncSession, user: User, entity_id: uuid.UUID):
         scope = self._scope_single(user)

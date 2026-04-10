@@ -4,8 +4,8 @@ from collections.abc import Sequence
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.allocation import MrDoctorAllocation, MrLocationAllocation, MrProductAllocation
-from app.models.doctor import Doctor, DoctorMedicalStore
+from app.models.allocation import MrDoctorAllocation, MrLocationAllocation, MrProductAllocation, MrStoreAllocation
+from app.models.doctor import Doctor
 from app.models.master import Division, Location, Product
 from app.models.stockist import MedicalStore
 
@@ -23,6 +23,10 @@ class AllocationsRepository:
 
     async def get_product_alloc(self, db: AsyncSession, alloc_id: uuid.UUID) -> MrProductAllocation | None:
         r = await db.execute(select(MrProductAllocation).where(MrProductAllocation.id == alloc_id))
+        return r.scalar_one_or_none()
+
+    async def get_store_alloc(self, db: AsyncSession, alloc_id: uuid.UUID) -> MrStoreAllocation | None:
+        r = await db.execute(select(MrStoreAllocation).where(MrStoreAllocation.id == alloc_id))
         return r.scalar_one_or_none()
 
     async def list_location_alloc_rows(
@@ -43,30 +47,14 @@ class AllocationsRepository:
         q = q.order_by(MrDoctorAllocation.allocated_at.desc())
         return (await db.execute(q)).scalars().all()
 
-    async def list_medical_stores_via_allocated_doctors(self, db: AsyncSession, mr_id: uuid.UUID, active_only: bool):
-        """Each row: mr_doctor_alloc_id, doctor_id, division_id, medical_store_id, allocated_by, allocated_at, is_active."""
-        q = (
-            select(
-                MrDoctorAllocation.id,
-                MrDoctorAllocation.doctor_id,
-                MrDoctorAllocation.division_id,
-                DoctorMedicalStore.medical_store_id,
-                MrDoctorAllocation.allocated_by,
-                MrDoctorAllocation.allocated_at,
-                MrDoctorAllocation.is_active,
-            )
-            .select_from(MrDoctorAllocation)
-            .join(DoctorMedicalStore, DoctorMedicalStore.doctor_id == MrDoctorAllocation.doctor_id)
-            .join(MedicalStore, MedicalStore.id == DoctorMedicalStore.medical_store_id)
-            .where(MrDoctorAllocation.mr_id == mr_id)
-        )
+    async def list_store_alloc_rows(
+        self, db: AsyncSession, mr_id: uuid.UUID, active_only: bool
+    ) -> Sequence[MrStoreAllocation]:
+        q = select(MrStoreAllocation).where(MrStoreAllocation.mr_id == mr_id)
         if active_only:
-            q = q.where(
-                MrDoctorAllocation.is_active.is_(True),
-                MedicalStore.is_active.is_(True),
-            )
-        q = q.order_by(MrDoctorAllocation.allocated_at.desc(), DoctorMedicalStore.medical_store_id)
-        return (await db.execute(q)).all()
+            q = q.where(MrStoreAllocation.is_active.is_(True))
+        q = q.order_by(MrStoreAllocation.allocated_at.desc())
+        return (await db.execute(q)).scalars().all()
 
     async def list_product_alloc_rows(
         self, db: AsyncSession, mr_id: uuid.UUID, active_only: bool
@@ -201,6 +189,38 @@ class AllocationsRepository:
         await db.refresh(row)
         return row
 
+    async def upsert_store_alloc(
+        self,
+        db: AsyncSession,
+        *,
+        mr_id: uuid.UUID,
+        medical_store_id: uuid.UUID,
+        allocated_by: uuid.UUID,
+    ) -> MrStoreAllocation:
+        r = await db.execute(
+            select(MrStoreAllocation).where(
+                MrStoreAllocation.mr_id == mr_id,
+                MrStoreAllocation.medical_store_id == medical_store_id,
+            )
+        )
+        existing = r.scalar_one_or_none()
+        if existing is not None:
+            existing.is_active = True
+            existing.allocated_by = allocated_by
+            await db.flush()
+            await db.refresh(existing)
+            return existing
+        row = MrStoreAllocation(
+            mr_id=mr_id,
+            medical_store_id=medical_store_id,
+            allocated_by=allocated_by,
+            is_active=True,
+        )
+        db.add(row)
+        await db.flush()
+        await db.refresh(row)
+        return row
+
     async def soft_delete_location(self, db: AsyncSession, row: MrLocationAllocation) -> None:
         row.is_active = False
         await db.flush()
@@ -212,6 +232,11 @@ class AllocationsRepository:
         await db.refresh(row)
 
     async def soft_delete_product(self, db: AsyncSession, row: MrProductAllocation) -> None:
+        row.is_active = False
+        await db.flush()
+        await db.refresh(row)
+
+    async def soft_delete_store(self, db: AsyncSession, row: MrStoreAllocation) -> None:
         row.is_active = False
         await db.flush()
         await db.refresh(row)

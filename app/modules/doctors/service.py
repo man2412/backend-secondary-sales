@@ -81,6 +81,8 @@ class DoctorsService:
         user: User,
         *,
         company_id_query: uuid.UUID | None,
+        q: str | None,
+        location_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -91,6 +93,8 @@ class DoctorsService:
         rows, total = await self._repo.list_doctors(
             db,
             company_id=scope,
+            q=q,
+            location_id=location_id,
             active_only=not include_inactive,
             mr_id=mr_filter,
             limit=per_page,
@@ -100,6 +104,26 @@ class DoctorsService:
         for d in rows:
             outs.append(await self.to_out(db, d))
         return outs, total
+
+    async def delete_doctor(self, db: AsyncSession, user: User, doctor_id: uuid.UUID) -> DoctorOut:
+        row = await self._repo.get_doctor(db, doctor_id)
+        if row is None:
+            raise ValueError("Doctor not found")
+        if not self._can_touch_doctor_company(user, row.company_id):
+            raise PermissionError("Doctor not in your company")
+        await self._repo.update_doctor(
+            db,
+            row,
+            full_name=None,
+            specialization=None,
+            qualification=None,
+            phone=None,
+            address=None,
+            location_id=None,
+            is_active=False,
+        )
+        await db.refresh(row)
+        return await self.to_out(db, row)
 
     async def get_doctor(self, db: AsyncSession, user: User, doctor_id: uuid.UUID) -> DoctorOut | None:
         scope = self._scope_single(user)

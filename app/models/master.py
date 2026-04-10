@@ -25,6 +25,7 @@ class Division(Base, TimestampMixin):
         Uuid(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    code: Mapped[str | None] = mapped_column(String(50))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     company: Mapped["Company"] = relationship(back_populates="divisions")
@@ -53,6 +54,7 @@ class Headquarter(Base, TimestampMixin):
         Uuid(as_uuid=True), ForeignKey("divisions.id"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    code: Mapped[str | None] = mapped_column(String(50))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -64,6 +66,7 @@ class Location(Base, TimestampMixin):
         Uuid(as_uuid=True), ForeignKey("headquarters.id"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    code: Mapped[str | None] = mapped_column(String(50))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 

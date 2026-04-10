@@ -2,11 +2,10 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.allocation import MrDoctorAllocation, MrLocationAllocation, MrProductAllocation
-from app.models.doctor import DoctorMedicalStore
+from app.models.allocation import MrDoctorAllocation, MrLocationAllocation, MrProductAllocation, MrStoreAllocation
 from app.models.enums import UserRole
 from app.models.sale import SecondarySale
 from app.models.user import User
@@ -65,21 +64,15 @@ class SalesService:
         )
         return r.one_or_none() is not None
 
-    async def _store_reachable_via_allocated_doctor(
-        self, db: AsyncSession, mr_id: uuid.UUID, store_id: uuid.UUID
-    ) -> bool:
-        q = (
-            select(func.count())
-            .select_from(MrDoctorAllocation)
-            .join(DoctorMedicalStore, DoctorMedicalStore.doctor_id == MrDoctorAllocation.doctor_id)
-            .where(
-                MrDoctorAllocation.mr_id == mr_id,
-                MrDoctorAllocation.is_active.is_(True),
-                DoctorMedicalStore.medical_store_id == store_id,
+    async def _has_store_alloc(self, db: AsyncSession, mr_id: uuid.UUID, store_id: uuid.UUID) -> bool:
+        r = await db.execute(
+            select(MrStoreAllocation.id).where(
+                MrStoreAllocation.mr_id == mr_id,
+                MrStoreAllocation.medical_store_id == store_id,
+                MrStoreAllocation.is_active.is_(True),
             )
         )
-        n = await db.scalar(q)
-        return (n or 0) > 0
+        return r.one_or_none() is not None
 
     async def _has_location_alloc(
         self, db: AsyncSession, mr_id: uuid.UUID, location_id: uuid.UUID
@@ -206,8 +199,8 @@ class SalesService:
             st = await self._stockists.get_medical_store(db, body.medical_store_id)
             if st is None or not st.is_active or st.company_id != mr_user.company_id:
                 raise ValueError("Medical store not found")
-            if not await self._store_reachable_via_allocated_doctor(db, mr_id, body.medical_store_id):
-                raise ValueError("Medical store must be linked to a doctor allocated to you")
+            if not await self._has_store_alloc(db, mr_id, body.medical_store_id):
+                raise ValueError("Medical store not allocated to you")
         n = await self._repo.count_mr_sales_on_date(db, mr_id=mr_id, sale_date=body.sale_date)
         if n >= MAX_SALES_PER_MR_PER_DAY:
             raise ValueError(f"Daily limit of {MAX_SALES_PER_MR_PER_DAY} active sales reached for this date")

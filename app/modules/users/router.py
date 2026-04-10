@@ -34,6 +34,7 @@ async def list_company_users(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     company_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search: name/email/phone/employee_code")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     try:
@@ -41,6 +42,7 @@ async def list_company_users(
             db,
             current,
             company_id_query=company_id,
+            q=q,
             page=page,
             per_page=per_page,
             include_inactive=include_inactive,
@@ -147,3 +149,34 @@ async def update_user(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     return ok(data=UserOut.model_validate(user).model_dump(mode="json"), message="User updated")
+
+
+@router.delete("/{user_id}")
+async def delete_user(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    try:
+        user = await UserService().delete_user(db, current, user_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return ok(data=UserOut.model_validate(user).model_dump(mode="json"), message="User deleted")
+
+
+@router.get("/{user_id}/reporting-chain")
+async def get_reporting_chain(
+    user_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    repo = UserRepository()
+    user = await repo.get_by_id(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if current.role != UserRole.SUPER_ADMIN and user.company_id != current.company_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Out of scope")
+    chain = await repo.reporting_chain(db, user_id)
+    return ok(data=chain)

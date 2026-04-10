@@ -18,6 +18,7 @@ class MasterRepository:
         db: AsyncSession,
         *,
         company_id: uuid.UUID | None,
+        q: str | None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -30,6 +31,10 @@ class MasterRepository:
         if active_only:
             base = base.where(State.is_active.is_(True))
             count_q = count_q.where(State.is_active.is_(True))
+        if q is not None and q.strip():
+            term = f"%{q.strip()}%"
+            base = base.where((State.name.ilike(term)) | (State.code.ilike(term)))
+            count_q = count_q.where((State.name.ilike(term)) | (State.code.ilike(term)))
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(State.name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()
@@ -64,6 +69,7 @@ class MasterRepository:
         db: AsyncSession,
         *,
         company_id: uuid.UUID | None,
+        q: str | None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -76,23 +82,31 @@ class MasterRepository:
         if active_only:
             base = base.where(Division.is_active.is_(True))
             count_q = count_q.where(Division.is_active.is_(True))
+        if q is not None and q.strip():
+            term = f"%{q.strip()}%"
+            base = base.where(Division.name.ilike(term))
+            count_q = count_q.where(Division.name.ilike(term))
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(Division.name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()
         return rows, int(total)
 
-    async def create_division(self, db: AsyncSession, *, company_id: uuid.UUID, name: str) -> Division:
-        row = Division(company_id=company_id, name=name, is_active=True)
+    async def create_division(
+        self, db: AsyncSession, *, company_id: uuid.UUID, name: str, code: str | None
+    ) -> Division:
+        row = Division(company_id=company_id, name=name, code=code, is_active=True)
         db.add(row)
         await db.flush()
         await db.refresh(row)
         return row
 
     async def update_division(
-        self, db: AsyncSession, row: Division, *, name: str | None, is_active: bool | None
+        self, db: AsyncSession, row: Division, *, name: str | None, code: str | None, is_active: bool | None
     ) -> Division:
         if name is not None:
             row.name = name
+        if code is not None:
+            row.code = code
         if is_active is not None:
             row.is_active = is_active
         await db.flush()
@@ -110,6 +124,7 @@ class MasterRepository:
         db: AsyncSession,
         *,
         company_id: uuid.UUID | None,
+        q: str | None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -122,25 +137,31 @@ class MasterRepository:
         if active_only:
             base = base.where(Headquarter.is_active.is_(True))
             count_q = count_q.where(Headquarter.is_active.is_(True))
+        if q is not None and q.strip():
+            term = f"%{q.strip()}%"
+            base = base.where(Headquarter.name.ilike(term))
+            count_q = count_q.where(Headquarter.name.ilike(term))
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(Headquarter.name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()
         return rows, int(total)
 
     async def create_headquarter(
-        self, db: AsyncSession, *, state_id: uuid.UUID, division_id: uuid.UUID, name: str
+        self, db: AsyncSession, *, state_id: uuid.UUID, division_id: uuid.UUID, name: str, code: str | None
     ) -> Headquarter:
-        row = Headquarter(state_id=state_id, division_id=division_id, name=name, is_active=True)
+        row = Headquarter(state_id=state_id, division_id=division_id, name=name, code=code, is_active=True)
         db.add(row)
         await db.flush()
         await db.refresh(row)
         return row
 
     async def update_headquarter(
-        self, db: AsyncSession, row: Headquarter, *, name: str | None, is_active: bool | None
+        self, db: AsyncSession, row: Headquarter, *, name: str | None, code: str | None, is_active: bool | None
     ) -> Headquarter:
         if name is not None:
             row.name = name
+        if code is not None:
+            row.code = code
         if is_active is not None:
             row.is_active = is_active
         await db.flush()
@@ -158,6 +179,8 @@ class MasterRepository:
         db: AsyncSession,
         *,
         company_id: uuid.UUID | None,
+        q: str | None,
+        headquarter_id: uuid.UUID | None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -179,23 +202,34 @@ class MasterRepository:
         if active_only:
             base = base.where(Location.is_active.is_(True))
             count_q = count_q.where(Location.is_active.is_(True))
+        if headquarter_id is not None:
+            base = base.where(Location.headquarter_id == headquarter_id)
+            count_q = count_q.where(Location.headquarter_id == headquarter_id)
+        if q is not None and q.strip():
+            term = f"%{q.strip()}%"
+            base = base.where(Location.name.ilike(term))
+            count_q = count_q.where(Location.name.ilike(term))
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(Location.name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()
         return rows, int(total)
 
-    async def create_location(self, db: AsyncSession, *, headquarter_id: uuid.UUID, name: str) -> Location:
-        row = Location(headquarter_id=headquarter_id, name=name, is_active=True)
+    async def create_location(
+        self, db: AsyncSession, *, headquarter_id: uuid.UUID, name: str, code: str | None
+    ) -> Location:
+        row = Location(headquarter_id=headquarter_id, name=name, code=code, is_active=True)
         db.add(row)
         await db.flush()
         await db.refresh(row)
         return row
 
     async def update_location(
-        self, db: AsyncSession, row: Location, *, name: str | None, is_active: bool | None
+        self, db: AsyncSession, row: Location, *, name: str | None, code: str | None, is_active: bool | None
     ) -> Location:
         if name is not None:
             row.name = name
+        if code is not None:
+            row.code = code
         if is_active is not None:
             row.is_active = is_active
         await db.flush()
@@ -213,6 +247,8 @@ class MasterRepository:
         db: AsyncSession,
         *,
         company_id: uuid.UUID | None,
+        q: str | None,
+        division_id: uuid.UUID | None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -225,6 +261,13 @@ class MasterRepository:
         if active_only:
             base = base.where(Product.is_active.is_(True))
             count_q = count_q.where(Product.is_active.is_(True))
+        if division_id is not None:
+            base = base.where(Product.division_id == division_id)
+            count_q = count_q.where(Product.division_id == division_id)
+        if q is not None and q.strip():
+            term = f"%{q.strip()}%"
+            base = base.where(Product.name.ilike(term))
+            count_q = count_q.where(Product.name.ilike(term))
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(Product.name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()

@@ -47,6 +47,7 @@ class MasterService:
         user: User,
         *,
         company_id_query: uuid.UUID | None,
+        q: str | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -56,6 +57,7 @@ class MasterService:
         rows, total = await self._repo.list_states(
             db,
             company_id=scope,
+            q=q,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,
@@ -103,6 +105,7 @@ class MasterService:
         user: User,
         *,
         company_id_query: uuid.UUID | None,
+        q: str | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -112,6 +115,7 @@ class MasterService:
         rows, total = await self._repo.list_divisions(
             db,
             company_id=scope,
+            q=q,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,
@@ -129,7 +133,7 @@ class MasterService:
 
     async def create_division(self, db: AsyncSession, user: User, body: DivisionCreate):
         self._ensure_super_admin(user)
-        return await self._repo.create_division(db, company_id=body.company_id, name=body.name)
+        return await self._repo.create_division(db, company_id=body.company_id, name=body.name, code=body.code)
 
     async def update_division(self, db: AsyncSession, user: User, division_id: uuid.UUID, body: DivisionUpdate):
         self._ensure_super_admin(user)
@@ -142,7 +146,9 @@ class MasterService:
         data = body.model_dump(exclude_unset=True)
         if not data:
             raise ValueError("No fields to update")
-        return await self._repo.update_division(db, row, name=data.get("name"), is_active=data.get("is_active"))
+        return await self._repo.update_division(
+            db, row, name=data.get("name"), code=data.get("code"), is_active=data.get("is_active")
+        )
 
     # --- Headquarter ---
 
@@ -152,6 +158,7 @@ class MasterService:
         user: User,
         *,
         company_id_query: uuid.UUID | None,
+        q: str | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -161,6 +168,7 @@ class MasterService:
         rows, total = await self._repo.list_headquarters(
             db,
             company_id=scope,
+            q=q,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,
@@ -188,7 +196,7 @@ class MasterService:
         if st.company_id != div.company_id:
             raise ValueError("State and division must belong to the same company")
         return await self._repo.create_headquarter(
-            db, state_id=body.state_id, division_id=body.division_id, name=body.name
+            db, state_id=body.state_id, division_id=body.division_id, name=body.name, code=body.code
         )
 
     async def update_headquarter(self, db: AsyncSession, user: User, hq_id: uuid.UUID, body: HeadquarterUpdate):
@@ -205,7 +213,9 @@ class MasterService:
         data = body.model_dump(exclude_unset=True)
         if not data:
             raise ValueError("No fields to update")
-        return await self._repo.update_headquarter(db, row, name=data.get("name"), is_active=data.get("is_active"))
+        return await self._repo.update_headquarter(
+            db, row, name=data.get("name"), code=data.get("code"), is_active=data.get("is_active")
+        )
 
     # --- Location ---
 
@@ -215,6 +225,8 @@ class MasterService:
         user: User,
         *,
         company_id_query: uuid.UUID | None,
+        q: str | None,
+        headquarter_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -224,6 +236,8 @@ class MasterService:
         rows, total = await self._repo.list_locations(
             db,
             company_id=scope,
+            q=q,
+            headquarter_id=headquarter_id,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,
@@ -250,7 +264,9 @@ class MasterService:
         hq = await self._repo.get_headquarter(db, body.headquarter_id)
         if hq is None:
             raise ValueError("Headquarter not found")
-        return await self._repo.create_location(db, headquarter_id=body.headquarter_id, name=body.name)
+        return await self._repo.create_location(
+            db, headquarter_id=body.headquarter_id, name=body.name, code=body.code
+        )
 
     async def update_location(self, db: AsyncSession, user: User, location_id: uuid.UUID, body: LocationUpdate):
         self._ensure_super_admin(user)
@@ -269,7 +285,9 @@ class MasterService:
         data = body.model_dump(exclude_unset=True)
         if not data:
             raise ValueError("No fields to update")
-        return await self._repo.update_location(db, row, name=data.get("name"), is_active=data.get("is_active"))
+        return await self._repo.update_location(
+            db, row, name=data.get("name"), code=data.get("code"), is_active=data.get("is_active")
+        )
 
     # --- Product ---
 
@@ -279,6 +297,8 @@ class MasterService:
         user: User,
         *,
         company_id_query: uuid.UUID | None,
+        q: str | None,
+        division_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -288,6 +308,8 @@ class MasterService:
         rows, total = await self._repo.list_products(
             db,
             company_id=scope,
+            q=q,
+            division_id=division_id,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,

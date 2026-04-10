@@ -51,6 +51,8 @@ async def list_super_stockists(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     company_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search: name/gst/pan/unique_code")] = None,
+    location_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = StockistsService()
@@ -58,6 +60,8 @@ async def list_super_stockists(
         db,
         current,
         company_id_query=company_id,
+        q=q,
+        location_id=location_id,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
@@ -118,6 +122,9 @@ async def list_stockists(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     company_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search: name/gst/pan/unique_code")] = None,
+    super_stockist_id: Annotated[UUID | None, Query()] = None,
+    location_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = StockistsService()
@@ -125,6 +132,9 @@ async def list_stockists(
         db,
         current,
         company_id_query=company_id,
+        q=q,
+        super_stockist_id=super_stockist_id,
+        location_id=location_id,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
@@ -185,6 +195,9 @@ async def list_medical_stores(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     company_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search: name/gst/pan/unique_code")] = None,
+    stockist_id: Annotated[UUID | None, Query()] = None,
+    location_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = StockistsService()
@@ -192,11 +205,59 @@ async def list_medical_stores(
         db,
         current,
         company_id_query=company_id,
+        q=q,
+        stockist_id=stockist_id,
+        location_id=location_id,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=MedicalStoreOut)
+
+
+@router.delete("/super-stockists/{entity_id}")
+async def delete_super_stockist(
+    entity_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(_super_admin)],
+) -> dict:
+    try:
+        row = await StockistsService().delete_super_stockist(db, current, entity_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return ok(data=SuperStockistOut.model_validate(row).model_dump(mode="json"), message="Deleted")
+
+
+@router.delete("/stockists/{entity_id}")
+async def delete_stockist(
+    entity_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(_super_admin)],
+) -> dict:
+    try:
+        row = await StockistsService().delete_stockist(db, current, entity_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return ok(data=StockistOut.model_validate(row).model_dump(mode="json"), message="Deleted")
+
+
+@router.delete("/medical-stores/{entity_id}")
+async def delete_medical_store(
+    entity_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    try:
+        row = await StockistsService().delete_medical_store(db, current, entity_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return ok(data=MedicalStoreOut.model_validate(row).model_dump(mode="json"), message="Deleted")
 
 
 @router.get("/medical-stores/{entity_id}")

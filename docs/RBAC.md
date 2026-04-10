@@ -52,7 +52,7 @@ Legend: **Yes** = allowed · **No** = denied (403 / blocked) · **Scoped** = all
 | `POST` / `PUT` medical-stores | Yes‡ | Yes‡ | Yes‡ | Yes‡ | Yes‡ | Yes‡ | **Yes**‡ |
 
 \* **`SUPER_ADMIN`:** optional `company_id` on lists; **`company_id` required** in body for create when super creates medical store.  
-† **MR:** list/get only for stores **reachable via allocated doctors** (`mr_doctor_allocations` + `doctor_medical_stores`).  
+† **MR:** list/get only for **allocated** stores (`mr_store_allocations`).  
 ‡ **Create/update:** any authenticated user may create/update a medical store **in their own company** (`company_id` on create must match, except super). **SUPER_ADMIN** may create/update any company when `company_id` is supplied / row is in that company.
 
 ---
@@ -83,11 +83,11 @@ Rough visibility:
 | **SALES_DIRECTOR** | All active MRs in company |
 | **SUPER_ADMIN** | All active MRs (all companies) |
 
-**Medical stores and MRs:** there is **no** direct MR–medical-store allocation. A store appears for an MR only if it is linked to a **doctor** (`doctor_medical_stores` on the doctor record) and that doctor is **allocated** to the MR (`mr_doctor_allocations`). The allocation bundle’s `medical_stores` list is this **derived** set (one row per doctor-allocation × linked store).
+**Allocations include medical stores directly** (`mr_store_allocations`).
 
-**Who may `POST` …/locations|doctors|products and `DELETE` …/locations|doctors|products/{alloc_id}`:**
+**Who may manage allocations (single endpoint)**
 
-| Role | Create / remove allocations |
+| Role | Add/remove allocations |
 |------|-----------------------------|
 | **MR** | **No** |
 | **ASM** | **Yes** (for visible MRs) |
@@ -97,7 +97,7 @@ Rough visibility:
 | **SALES_DIRECTOR** | **Yes** (for visible MRs) |
 | **SUPER_ADMIN** | **Yes** (for visible MRs) |
 
-Same **company / FK** validation as before (location, doctor+division, product must belong to MR’s company; stores are tied to doctors, not allocated directly).
+Same **company / FK** validation as before (location, doctor+division, store, product must belong to MR’s company).
 
 ---
 

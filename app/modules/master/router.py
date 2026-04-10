@@ -64,6 +64,7 @@ async def list_states(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     company_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search by name/code")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = MasterService()
@@ -71,6 +72,7 @@ async def list_states(
         db,
         current,
         company_id_query=company_id,
+        q=q,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
@@ -119,6 +121,21 @@ async def update_state(
     return ok(data=StateOut.model_validate(row).model_dump(mode="json"), message="State updated")
 
 
+@router.delete("/states/{state_id}")
+async def delete_state(
+    state_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(_super_admin)],
+) -> dict:
+    try:
+        row = await MasterService().update_state(db, current, state_id, StateUpdate(is_active=False))
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return ok(data=StateOut.model_validate(row).model_dump(mode="json"), message="Deleted")
+
+
 # --- Divisions ---
 
 
@@ -129,12 +146,14 @@ async def list_divisions(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     company_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search by name")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     rows, total = await MasterService().list_divisions(
         db,
         current,
         company_id_query=company_id,
+        q=q,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
@@ -183,6 +202,21 @@ async def update_division(
     return ok(data=DivisionOut.model_validate(row).model_dump(mode="json"), message="Division updated")
 
 
+@router.delete("/divisions/{division_id}")
+async def delete_division(
+    division_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(_super_admin)],
+) -> dict:
+    try:
+        row = await MasterService().update_division(db, current, division_id, DivisionUpdate(is_active=False))
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return ok(data=DivisionOut.model_validate(row).model_dump(mode="json"), message="Deleted")
+
+
 # --- Headquarters ---
 
 
@@ -193,12 +227,14 @@ async def list_headquarters(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     company_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search by name")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     rows, total = await MasterService().list_headquarters(
         db,
         current,
         company_id_query=company_id,
+        q=q,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
@@ -249,6 +285,21 @@ async def update_headquarter(
     return ok(data=HeadquarterOut.model_validate(row).model_dump(mode="json"), message="Headquarter updated")
 
 
+@router.delete("/headquarters/{hq_id}")
+async def delete_headquarter(
+    hq_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(_super_admin)],
+) -> dict:
+    try:
+        row = await MasterService().update_headquarter(db, current, hq_id, HeadquarterUpdate(is_active=False))
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return ok(data=HeadquarterOut.model_validate(row).model_dump(mode="json"), message="Deleted")
+
+
 # --- Locations ---
 
 
@@ -259,12 +310,16 @@ async def list_locations(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     company_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search by name")] = None,
+    headquarter_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     rows, total = await MasterService().list_locations(
         db,
         current,
         company_id_query=company_id,
+        q=q,
+        headquarter_id=headquarter_id,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
@@ -315,6 +370,21 @@ async def update_location(
     return ok(data=LocationOut.model_validate(row).model_dump(mode="json"), message="Location updated")
 
 
+@router.delete("/locations/{location_id}")
+async def delete_location(
+    location_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(_super_admin)],
+) -> dict:
+    try:
+        row = await MasterService().update_location(db, current, location_id, LocationUpdate(is_active=False))
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return ok(data=LocationOut.model_validate(row).model_dump(mode="json"), message="Deleted")
+
+
 # --- Products ---
 
 
@@ -325,12 +395,16 @@ async def list_products(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     company_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search by name")] = None,
+    division_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     rows, total = await MasterService().list_products(
         db,
         current,
         company_id_query=company_id,
+        q=q,
+        division_id=division_id,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
@@ -379,3 +453,18 @@ async def update_product(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     return ok(data=ProductOut.model_validate(row).model_dump(mode="json"), message="Product updated")
+
+
+@router.delete("/products/{product_id}")
+async def delete_product(
+    product_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current: Annotated[User, Depends(_super_admin)],
+) -> dict:
+    try:
+        row = await MasterService().update_product(db, current, product_id, ProductUpdate(is_active=False))
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return ok(data=ProductOut.model_validate(row).model_dump(mode="json"), message="Deleted")
