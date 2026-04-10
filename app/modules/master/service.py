@@ -23,9 +23,11 @@ class MasterService:
     def __init__(self, repo: MasterRepository | None = None) -> None:
         self._repo = repo or MasterRepository()
 
-    def _scope_list(self, user: User, company_id_query: uuid.UUID | None) -> uuid.UUID | None:
-        """List filter: None = all companies (SUPER_ADMIN only); else restrict to that company."""
+    def _scope_list(self, user: User, company_id_query: uuid.UUID | None) -> uuid.UUID:
+        """List filter: always one company — the user's company, or SUPER_ADMIN must pass company_id."""
         if user.role == UserRole.SUPER_ADMIN:
+            if company_id_query is None:
+                raise ValueError("company_id is required")
             return company_id_query
         return user.company_id
 

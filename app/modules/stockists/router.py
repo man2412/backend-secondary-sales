@@ -27,6 +27,13 @@ router = APIRouter(tags=["stockists"])
 _super_admin = require_roles(UserRole.SUPER_ADMIN)
 
 
+async def _catch_list_scope(awaitable):
+    try:
+        return await awaitable
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+
 def _paginated(items: list, *, page: int, per_page: int, total: int, out_cls: type) -> dict:
     total_pages = (total + per_page - 1) // per_page if total else 0
     data = [out_cls.model_validate(x).model_dump(mode="json") for x in items]
@@ -56,15 +63,17 @@ async def list_super_stockists(
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = StockistsService()
-    rows, total = await svc.list_super_stockists(
-        db,
-        current,
-        company_id_query=company_id,
-        q=q,
-        location_id=location_id,
-        page=page,
-        per_page=per_page,
-        include_inactive=include_inactive,
+    rows, total = await _catch_list_scope(
+        svc.list_super_stockists(
+            db,
+            current,
+            company_id_query=company_id,
+            q=q,
+            location_id=location_id,
+            page=page,
+            per_page=per_page,
+            include_inactive=include_inactive,
+        )
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=SuperStockistOut)
 
@@ -128,16 +137,18 @@ async def list_stockists(
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = StockistsService()
-    rows, total = await svc.list_stockists(
-        db,
-        current,
-        company_id_query=company_id,
-        q=q,
-        super_stockist_id=super_stockist_id,
-        location_id=location_id,
-        page=page,
-        per_page=per_page,
-        include_inactive=include_inactive,
+    rows, total = await _catch_list_scope(
+        svc.list_stockists(
+            db,
+            current,
+            company_id_query=company_id,
+            q=q,
+            super_stockist_id=super_stockist_id,
+            location_id=location_id,
+            page=page,
+            per_page=per_page,
+            include_inactive=include_inactive,
+        )
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=StockistOut)
 
@@ -201,16 +212,18 @@ async def list_medical_stores(
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = StockistsService()
-    rows, total = await svc.list_medical_stores(
-        db,
-        current,
-        company_id_query=company_id,
-        q=q,
-        stockist_id=stockist_id,
-        location_id=location_id,
-        page=page,
-        per_page=per_page,
-        include_inactive=include_inactive,
+    rows, total = await _catch_list_scope(
+        svc.list_medical_stores(
+            db,
+            current,
+            company_id_query=company_id,
+            q=q,
+            stockist_id=stockist_id,
+            location_id=location_id,
+            page=page,
+            per_page=per_page,
+            include_inactive=include_inactive,
+        )
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=MedicalStoreOut)
 

@@ -41,13 +41,24 @@ class SalesRepository:
         db: AsyncSession,
         *,
         mr_ids: list[uuid.UUID],
+        company_id: uuid.UUID,
         sale_date: date | None,
         active_only: bool,
         limit: int,
         offset: int,
     ) -> tuple[Sequence[SecondarySale], int]:
-        base = select(SecondarySale).where(SecondarySale.mr_id.in_(mr_ids))
-        count_q = select(func.count()).select_from(SecondarySale).where(SecondarySale.mr_id.in_(mr_ids))
+        base = select(SecondarySale).where(
+            SecondarySale.mr_id.in_(mr_ids),
+            SecondarySale.company_id == company_id,
+        )
+        count_q = (
+            select(func.count())
+            .select_from(SecondarySale)
+            .where(
+                SecondarySale.mr_id.in_(mr_ids),
+                SecondarySale.company_id == company_id,
+            )
+        )
         if sale_date is not None:
             base = base.where(SecondarySale.sale_date == sale_date)
             count_q = count_q.where(SecondarySale.sale_date == sale_date)

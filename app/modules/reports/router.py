@@ -42,7 +42,10 @@ async def report_secondary_sales_analytics(
     current: Annotated[User, Depends(get_current_user)],
     date_from: Annotated[_ReportDate, Query(description="Calendar date, e.g. 2026-03-24 (ISO datetime OK; time is ignored)")],
     date_to: Annotated[_ReportDate, Query(description="Calendar date, e.g. 2026-03-24 (ISO datetime OK; time is ignored)")],
-    company_id: Annotated[UUID | None, Query()] = None,
+    company_id: Annotated[
+        UUID | None,
+        Query(description="Required for SUPER_ADMIN; other roles use their own company (must not pass another company)"),
+    ] = None,
     include_inactive: Annotated[bool, Query()] = False,
     mr_id: Annotated[UUID | None, Query()] = None,
     doctor_id: Annotated[UUID | None, Query()] = None,

@@ -13,8 +13,10 @@ class DoctorsService:
     def __init__(self, repo: DoctorsRepository | None = None) -> None:
         self._repo = repo or DoctorsRepository()
 
-    def _scope_list(self, user: User, company_id_query: uuid.UUID | None) -> uuid.UUID | None:
+    def _scope_list(self, user: User, company_id_query: uuid.UUID | None) -> uuid.UUID:
         if user.role == UserRole.SUPER_ADMIN:
+            if company_id_query is None:
+                raise ValueError("company_id is required")
             return company_id_query
         return user.company_id
 

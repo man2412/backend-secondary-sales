@@ -33,6 +33,13 @@ router = APIRouter(tags=["master"])
 _super_admin = require_roles(UserRole.SUPER_ADMIN)
 
 
+async def _catch_list_scope(awaitable):
+    try:
+        return await awaitable
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+
 def _paginated(
     items: list,
     *,
@@ -68,14 +75,16 @@ async def list_states(
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = MasterService()
-    rows, total = await svc.list_states(
-        db,
-        current,
-        company_id_query=company_id,
-        q=q,
-        page=page,
-        per_page=per_page,
-        include_inactive=include_inactive,
+    rows, total = await _catch_list_scope(
+        svc.list_states(
+            db,
+            current,
+            company_id_query=company_id,
+            q=q,
+            page=page,
+            per_page=per_page,
+            include_inactive=include_inactive,
+        )
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=StateOut)
 
@@ -149,14 +158,16 @@ async def list_divisions(
     q: Annotated[str | None, Query(description="Search by name")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
-    rows, total = await MasterService().list_divisions(
-        db,
-        current,
-        company_id_query=company_id,
-        q=q,
-        page=page,
-        per_page=per_page,
-        include_inactive=include_inactive,
+    rows, total = await _catch_list_scope(
+        MasterService().list_divisions(
+            db,
+            current,
+            company_id_query=company_id,
+            q=q,
+            page=page,
+            per_page=per_page,
+            include_inactive=include_inactive,
+        )
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=DivisionOut)
 
@@ -230,14 +241,16 @@ async def list_headquarters(
     q: Annotated[str | None, Query(description="Search by name")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
-    rows, total = await MasterService().list_headquarters(
-        db,
-        current,
-        company_id_query=company_id,
-        q=q,
-        page=page,
-        per_page=per_page,
-        include_inactive=include_inactive,
+    rows, total = await _catch_list_scope(
+        MasterService().list_headquarters(
+            db,
+            current,
+            company_id_query=company_id,
+            q=q,
+            page=page,
+            per_page=per_page,
+            include_inactive=include_inactive,
+        )
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=HeadquarterOut)
 
@@ -314,15 +327,17 @@ async def list_locations(
     headquarter_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
-    rows, total = await MasterService().list_locations(
-        db,
-        current,
-        company_id_query=company_id,
-        q=q,
-        headquarter_id=headquarter_id,
-        page=page,
-        per_page=per_page,
-        include_inactive=include_inactive,
+    rows, total = await _catch_list_scope(
+        MasterService().list_locations(
+            db,
+            current,
+            company_id_query=company_id,
+            q=q,
+            headquarter_id=headquarter_id,
+            page=page,
+            per_page=per_page,
+            include_inactive=include_inactive,
+        )
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=LocationOut)
 
@@ -399,15 +414,17 @@ async def list_products(
     division_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
-    rows, total = await MasterService().list_products(
-        db,
-        current,
-        company_id_query=company_id,
-        q=q,
-        division_id=division_id,
-        page=page,
-        per_page=per_page,
-        include_inactive=include_inactive,
+    rows, total = await _catch_list_scope(
+        MasterService().list_products(
+            db,
+            current,
+            company_id_query=company_id,
+            q=q,
+            division_id=division_id,
+            page=page,
+            per_page=per_page,
+            include_inactive=include_inactive,
+        )
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=ProductOut)
 

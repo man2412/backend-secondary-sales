@@ -39,6 +39,15 @@ class SalesService:
         self._doctors = DoctorsRepository()
         self._stockists = StockistsRepository()
 
+    def _scope_sales_company(self, user: User, company_id_query: uuid.UUID | None) -> uuid.UUID:
+        if user.role == UserRole.SUPER_ADMIN:
+            if company_id_query is None:
+                raise ValueError("company_id is required")
+            return company_id_query
+        if company_id_query is not None and company_id_query != user.company_id:
+            raise PermissionError("company_id not allowed for this role")
+        return user.company_id
+
     async def _has_product_alloc(
         self, db: AsyncSession, mr_id: uuid.UUID, product_id: uuid.UUID
     ) -> bool:
@@ -119,10 +128,12 @@ class SalesService:
         *,
         page: int,
         per_page: int,
+        company_id_query: uuid.UUID | None,
         sale_date: date | None,
         mr_id_filter: uuid.UUID | None,
         include_inactive: bool,
     ) -> tuple[list[dict], int]:
+        company_id = self._scope_sales_company(user, company_id_query)
         visible = await UserService().get_visible_mr_ids(db, user)
         if not visible:
             return [], 0
@@ -135,6 +146,7 @@ class SalesService:
         rows, total = await self._repo.list_sales(
             db,
             mr_ids=mr_ids,
+            company_id=company_id,
             sale_date=sale_date,
             active_only=not include_inactive,
             limit=per_page,
@@ -142,10 +154,20 @@ class SalesService:
         )
         return [self._to_out(r) for r in rows], total
 
-    async def get_sale(self, db: AsyncSession, user: User, sale_id: uuid.UUID) -> dict | None:
+    async def get_sale(
+        self,
+        db: AsyncSession,
+        user: User,
+        sale_id: uuid.UUID,
+        *,
+        company_id_query: uuid.UUID | None,
+    ) -> dict | None:
+        company_id = self._scope_sales_company(user, company_id_query)
         visible = await UserService().get_visible_mr_ids(db, user)
         row = await self._repo.get_sale(db, sale_id)
         if row is None:
+            return None
+        if row.company_id != company_id:
             return None
         if row.mr_id not in visible:
             return None

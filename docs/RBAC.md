@@ -37,7 +37,8 @@ Legend: **Yes** = allowed · **No** = denied (403 / blocked) · **Scoped** = all
 
 | Action | MR | ASM | … all non–super | SUPER_ADMIN |
 |--------|----|-----|-----------------|-------------|
-| `GET` list / `GET` by id | Yes (company-scoped; super may pass `company_id`) | Same | Same | Same |
+| `GET` list | Yes (company-scoped) | Same | Same | Yes — **`company_id` query required** (no cross-company list without it) |
+| `GET` by id | Yes (company-scoped) | Same | Same | Yes (any row by id; unchanged) |
 | `POST` / `PUT` (create / update) | **No** | **No** | **No** | **Yes** |
 
 ---
@@ -51,7 +52,7 @@ Legend: **Yes** = allowed · **No** = denied (403 / blocked) · **Scoped** = all
 | `GET` medical-stores | Scoped† | Yes | Yes | Yes | Yes | Yes | Yes* |
 | `POST` / `PUT` medical-stores | Yes‡ | Yes‡ | Yes‡ | Yes‡ | Yes‡ | Yes‡ | **Yes**‡ |
 
-\* **`SUPER_ADMIN`:** optional `company_id` on lists; **`company_id` required** in body for create when super creates medical store.  
+\* **`SUPER_ADMIN`:** **`company_id` query required** on lists; **`company_id` required** in body for create when super creates medical store.  
 † **MR:** list/get only for **allocated** stores (`mr_store_allocations`).  
 ‡ **Create/update:** any authenticated user may create/update a medical store **in their own company** (`company_id` on create must match, except super). **SUPER_ADMIN** may create/update any company when `company_id` is supplied / row is in that company.
 
@@ -61,11 +62,11 @@ Legend: **Yes** = allowed · **No** = denied (403 / blocked) · **Scoped** = all
 
 | Action | MR | ASM | … all company users | SUPER_ADMIN |
 |--------|----|-----|---------------------|-------------|
-| `GET` list | Scoped (allocated doctors only for MR) | Company-scoped list | Same | Yes* |
+| `GET` list | Scoped (allocated doctors only for MR) | Company-scoped list | Same | Yes — **`company_id` query required** |
 | `GET` by id | If allocated | If visible in company | Same | Yes |
 | `POST` / `PUT` | Yes (own company) | Yes (own company) | Yes (own company) | **Yes** (`company_id` required on create) |
 
-\* **`SUPER_ADMIN`** needs `company_id` on create.
+\* **`SUPER_ADMIN`** needs `company_id` on list and on create.
 
 ---
 
@@ -105,11 +106,11 @@ Same **company / FK** validation as before (location, doctor+division, store, pr
 
 | Action | MR | ASM | … management | SUPER_ADMIN |
 |--------|----|-----|----------------|-------------|
-| `GET` list / `GET` by id | Scoped (visible MR ids) | Scoped | Scoped | Scoped† |
+| `GET` list / `GET` by id | Scoped (visible MR ids + company) | Scoped | Scoped | Scoped† |
 | `POST` (create) | **Yes** (allocations + rules) | **No** | **No** | **Yes** (must send `mr_id` for the MR on whose behalf the sale is recorded) |
 | `PUT` / `DELETE` (soft delete) | **No** | **No** | **No** | **Yes** (any sale) |
 
-† **SUPER_ADMIN** sees all MRs’ sales globally unless filtered; optional `company_id` on analytics (see Reports).
+† **SUPER_ADMIN** must pass query **`company_id`** on list and get (same as other list APIs); rows are filtered to that company and visible MRs.
 
 ---
 
@@ -119,9 +120,9 @@ Single **`GET /secondary-sales/analytics`** replaces separate summary / by-MR / 
 
 | Action | MR | Management / SUPER_ADMIN |
 |--------|----|---------------------------|
-| Analytics (summary, time series, pie charts) | **Own MR only** (`get_visible_mr_ids`) | Scoped to visible MRs; **SUPER_ADMIN** may pass `company_id` to narrow secondary-sales rows |
+| Analytics (summary, time series, pie charts) | **Own MR only** (`get_visible_mr_ids`) | Scoped to visible MRs; **SUPER_ADMIN** must pass **`company_id`** (400 if missing) |
 
-**Query highlights:** `date_from`, `date_to`; optional filters `company_id` (super), `mr_id`, `doctor_id`, `headquarter_id`, `location_id`, `product_id`, `division_id`, `state_id`, `include_inactive`. **`timeseries_bucket`:** `day` \| `week` \| `month` (revenue + quantities per period for bar/line charts). **`pie`:** comma-separated `product`, `location`, `headquarter` (or `hq`), `division`, `rsm`, `asm` — each series includes `revenue`, `sale_qty`, `pct_revenue`, `pct_quantity`. **RSM/ASM pies** need a single company: non–super users use their `company_id`; **SUPER_ADMIN** must pass **`company_id`** when requesting `rsm` or `asm` pies.
+**Query highlights:** `date_from`, `date_to`; **`company_id`** required for **SUPER_ADMIN**; optional `mr_id`, `doctor_id`, `headquarter_id`, `location_id`, `product_id`, `division_id`, `state_id`, `include_inactive`. **`timeseries_bucket`:** `day` \| `week` \| `month`. **`pie`:** comma-separated `product`, `location`, `headquarter` (or `hq`), `division`, `rsm`, `asm`. Non–super users are scoped to their company automatically.
 
 ---
 

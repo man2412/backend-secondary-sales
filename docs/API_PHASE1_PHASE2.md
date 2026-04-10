@@ -96,7 +96,7 @@ Used on **`GET`** list endpoints unless the endpoint says otherwise:
 |-------|------|----------|---------|--------|
 | `page` | integer | no | `1` | ≥ 1 |
 | `per_page` | integer | no | `20` | 1–100 |
-| `company_id` | UUID | no | — | **SUPER_ADMIN:** optional filter. **Others:** ignored; server uses caller’s company |
+| `company_id` | UUID | **yes for SUPER_ADMIN** | — | **SUPER_ADMIN:** required on these lists (400 if missing). **Others:** ignored; server uses caller’s company |
 | `include_inactive` | boolean | no | `false` | `true` includes inactive rows |
 
 ---
@@ -854,6 +854,7 @@ Base: **`/v1/secondary-sales`**.
 |-------|------|----------|---------|
 | `page` | integer | no | `1` |
 | `per_page` | integer | no | `20` (1–100) |
+| `company_id` | UUID | **SUPER_ADMIN:** yes; **others:** no (uses own company) | — |
 | `sale_date` | date (`YYYY-MM-DD`) | no | — filter |
 | `mr_id` | UUID | no | — must be visible to caller |
 | `include_inactive` | boolean | no | `false` |
@@ -876,8 +877,10 @@ Base: **`/v1/secondary-sales`**.
 ### `GET /v1/secondary-sales/{sale_id}`
 
 | Path | `sale_id` (UUID) |
+| **Query** | `company_id` — **SUPER_ADMIN:** required; **others:** omit (own company) |
 | **Response `200`** | `data` = [§2.9 `SecondarySaleOut`](#29-secondarysaleout) |
-| `404` | Not found or MR not visible to caller |
+| `400` | **SUPER_ADMIN** without `company_id`, or non–super with disallowed `company_id` |
+| `404` | Not found, wrong company, or MR not visible to caller |
 
 ---
 
@@ -1024,7 +1027,7 @@ Uploads an **Excel (`.xlsx`) or PDF (`.pdf`)** and inserts rows into secondary s
 
 | Query | Type | Notes |
 |-------|------|--------|
-| `company_id` | UUID | SUPER_ADMIN only |
+| `company_id` | UUID | **SUPER_ADMIN:** required (400 if missing). **Others:** omit (own company); must not pass another company |
 | `mr_id` | UUID | Must be visible to caller |
 | `doctor_id`, `headquarter_id`, `location_id`, `product_id`, `division_id`, `state_id` | UUID | AND filters on sales |
 | `include_inactive` | boolean | default `false` |
@@ -1037,7 +1040,7 @@ Uploads an **Excel (`.xlsx`) or PDF (`.pdf`)** and inserts rows into secondary s
 | `timeseries_bucket` | `day` \| `week` \| `month` | Adds `data.time_series[]` |
 | `pie` | comma-separated | Adds `data.pies[]`. Tokens: `product`, `location`, `headquarter` or `hq`, `division`, `rsm`, `asm` |
 
-For **`pie`** including **`rsm`** or **`asm`**, **SUPER_ADMIN** must pass **`company_id`**.
+**`pie`** including **`rsm`** or **`asm`** still requires a single company — satisfied because **`company_id`** is now required for **SUPER_ADMIN** on every analytics call.
 
 **Response `200`**
 
@@ -1049,7 +1052,7 @@ For **`pie`** including **`rsm`** or **`asm`**, **SUPER_ADMIN** must pass **`com
     "date_from": "2026-03-01",
     "date_to": "2026-03-31",
     "filters": {
-      "company_id": null,
+      "company_id": "uuid",
       "mr_id": null,
       "doctor_id": null,
       "headquarter_id": null,
@@ -1077,7 +1080,7 @@ For **`pie`** including **`rsm`** or **`asm`**, **SUPER_ADMIN** must pass **`com
 
 | Errors | |
 |--------|--|
-| `400` | Invalid date range, unknown `pie` token, missing `company_id` for RSM/ASM pie as super |
+| `400` | Invalid date range, unknown `pie` token, **SUPER_ADMIN** missing `company_id` |
 | `403` | e.g. `mr_id` not allowed |
 
 ---

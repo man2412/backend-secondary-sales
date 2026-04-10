@@ -31,7 +31,8 @@ Notes:
 
 | Action | MR | ASM | DEPUTY_RSM | RSM | STATE_HEAD | SALES_DIRECTOR | SUPER_ADMIN |
 |--------|----|-----|------------|-----|------------|----------------|-------------|
-| `GET` list / `GET` by id | Yes (company-scoped) | Yes | Yes | Yes | Yes | Yes | Yes (optional `company_id` filter) |
+| `GET` list | Yes (company-scoped) | Yes | Yes | Yes | Yes | Yes | Yes — **`company_id` query required** |
+| `GET` by id | Yes (company-scoped) | Yes | Yes | Yes | Yes | Yes | Yes |
 | `POST` / `PUT` (create/update) | **No** | **No** | **No** | **No** | **No** | **No** | **Yes** |
 
 ---
@@ -42,14 +43,14 @@ Notes:
 
 | Action | MR | ASM | DEPUTY_RSM | RSM | STATE_HEAD | SALES_DIRECTOR | SUPER_ADMIN |
 |--------|----|-----|------------|-----|------------|----------------|-------------|
-| `GET` list / `GET` by id | Yes (company-scoped) | Yes | Yes | Yes | Yes | Yes | Yes (optional `company_id` filter) |
+| `GET` list / `GET` by id | Yes (company-scoped) | Yes | Yes | Yes | Yes | Yes | Yes — list: **`company_id` query required** |
 | `POST` / `PUT` | **No** | **No** | **No** | **No** | **No** | **No** | **Yes** |
 
 ### 3.2 Medical stores (`/v1/medical-stores`)
 
 | Action | MR | ASM | DEPUTY_RSM | RSM | STATE_HEAD | SALES_DIRECTOR | SUPER_ADMIN |
 |--------|----|-----|------------|-----|------------|----------------|-------------|
-| `GET` list / `GET` by id | Scoped† | Yes | Yes | Yes | Yes | Yes | Yes (optional `company_id` filter) |
+| `GET` list / `GET` by id | Scoped† | Yes | Yes | Yes | Yes | Yes | Yes — list: **`company_id` query required** |
 | `POST` / `PUT` | Yes‡ | Yes‡ | Yes‡ | Yes‡ | Yes‡ | Yes‡ | Yes‡ |
 
 Notes:
@@ -62,12 +63,12 @@ Notes:
 
 | Action | MR | ASM | DEPUTY_RSM | RSM | STATE_HEAD | SALES_DIRECTOR | SUPER_ADMIN |
 |--------|----|-----|------------|-----|------------|----------------|-------------|
-| `GET` list | Scoped (allocated doctors only) | Scoped (company) | Scoped (company) | Scoped (company) | Scoped (company) | Scoped (company) | Yes (optional `company_id`) |
+| `GET` list | Scoped (allocated doctors only) | Scoped (company) | Scoped (company) | Scoped (company) | Scoped (company) | Scoped (company) | Yes — **`company_id` query required** |
 | `GET` by id | Scoped (only if allocated) | Scoped | Scoped | Scoped | Scoped | Scoped | Yes |
 | `POST` / `PUT` | Yes (own company) | Yes (own company) | Yes (own company) | Yes (own company) | Yes (own company) | Yes (own company) | Yes* |
 
 Notes:
-- * **SUPER_ADMIN** must send `company_id` on create.
+- * **SUPER_ADMIN** must send `company_id` on list and on create.
 - Doctors can be linked to medical stores via `medical_store_ids` (used to derive MR→store reachability through allocations).
 
 ---
@@ -101,8 +102,8 @@ Important:
 
 | Action | MR | ASM | DEPUTY_RSM | RSM | STATE_HEAD | SALES_DIRECTOR | SUPER_ADMIN |
 |--------|----|-----|------------|-----|------------|----------------|-------------|
-| `GET /secondary-sales` (list) | Scoped (visible MRs) | Scoped | Scoped | Scoped | Scoped | Scoped | Scoped |
-| `GET /secondary-sales/{id}` | Scoped | Scoped | Scoped | Scoped | Scoped | Scoped | Scoped |
+| `GET /secondary-sales` (list) | Scoped (visible MRs + company) | Scoped | Scoped | Scoped | Scoped | Scoped | Scoped — **`company_id` query required** |
+| `GET /secondary-sales/{id}` | Scoped | Scoped | Scoped | Scoped | Scoped | Scoped | Scoped — **`company_id` query required** |
 | `POST /secondary-sales` (create) | **Yes** (self) | **No** | **No** | **No** | **No** | **No** | **Yes** (on behalf of MR via `mr_id`) |
 | `PUT /secondary-sales/{id}` (update) | **No** | **No** | **No** | **No** | **No** | **No** | **Yes** |
 | `DELETE /secondary-sales/{id}` (soft delete) | **No** | **No** | **No** | **No** | **No** | **No** | **Yes** |
@@ -113,11 +114,11 @@ Important:
 
 | Action | MR | ASM | DEPUTY_RSM | RSM | STATE_HEAD | SALES_DIRECTOR | SUPER_ADMIN |
 |--------|----|-----|------------|-----|------------|----------------|-------------|
-| `GET /reports/secondary-sales/analytics` | Scoped (self MR) | Scoped (visible MRs) | Scoped | Scoped | Scoped | Scoped | Scoped (all MRs; optional `company_id` filter) |
+| `GET /reports/secondary-sales/analytics` | Scoped (self MR) | Scoped (visible MRs) | Scoped | Scoped | Scoped | Scoped | Scoped — **`company_id` query required** |
 
 Notes:
 - MR sees only their own data.
 - Higher roles see data for MRs “below” them via `get_visible_mr_ids`.
 - Supports combined filters (`mr_id`, `doctor_id`, `headquarter_id`, `location_id`, `product_id`, etc.), `timeseries_bucket`, and `pie` breakdowns.
-- For `pie=rsm` or `pie=asm`: **SUPER_ADMIN must pass `company_id`** (org tree is company-local).
+- **SUPER_ADMIN** must pass **`company_id`** on analytics (same as other list-style APIs).
 

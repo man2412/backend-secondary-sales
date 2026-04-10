@@ -44,8 +44,10 @@ class ReportsService:
 
     async def _scope_company_id(
         self, db: AsyncSession, user: User, company_id_query: uuid.UUID | None
-    ) -> uuid.UUID | None:
+    ) -> uuid.UUID:
         if user.role == UserRole.SUPER_ADMIN:
+            if company_id_query is None:
+                raise ValueError("company_id is required")
             return company_id_query
         if company_id_query is not None and company_id_query != user.company_id:
             raise PermissionError("company_id not allowed for this role")
