@@ -7,26 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.allocation import MrDoctorAllocation
 from app.models.doctor import Doctor, DoctorMedicalStore
 from app.models.master import Headquarter, Location, State
-from app.models.stockist import MedicalStore
 
 
 class DoctorsRepository:
-    async def location_company_id(self, db: AsyncSession, location_id: uuid.UUID) -> uuid.UUID | None:
-        r = await db.execute(
-            select(State.company_id)
-            .select_from(Location)
-            .join(Headquarter, Location.headquarter_id == Headquarter.id)
-            .join(State, Headquarter.state_id == State.id)
-            .where(Location.id == location_id)
-        )
-        row = r.one_or_none()
-        return row[0] if row else None
-
-    async def medical_store_company(self, db: AsyncSession, store_id: uuid.UUID) -> uuid.UUID | None:
-        r = await db.execute(select(MedicalStore.company_id).where(MedicalStore.id == store_id))
-        row = r.one_or_none()
-        return row[0] if row else None
-
     async def get_doctor(self, db: AsyncSession, doctor_id: uuid.UUID) -> Doctor | None:
         r = await db.execute(select(Doctor).where(Doctor.id == doctor_id))
         return r.scalar_one_or_none()
@@ -49,7 +32,6 @@ class DoctorsRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID | None,
         q: str | None,
         location_id: uuid.UUID | None,
         active_only: bool,
@@ -59,9 +41,6 @@ class DoctorsRepository:
     ) -> tuple[Sequence[Doctor], int]:
         base = select(Doctor)
         count_q = select(func.count()).select_from(Doctor)
-        if company_id is not None:
-            base = base.where(Doctor.company_id == company_id)
-            count_q = count_q.where(Doctor.company_id == company_id)
         if active_only:
             base = base.where(Doctor.is_active.is_(True))
             count_q = count_q.where(Doctor.is_active.is_(True))
@@ -88,7 +67,6 @@ class DoctorsRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID,
         full_name: str,
         specialization: str | None,
         qualification: str | None,
@@ -97,7 +75,6 @@ class DoctorsRepository:
         location_id: uuid.UUID | None,
     ) -> Doctor:
         row = Doctor(
-            company_id=company_id,
             full_name=full_name,
             specialization=specialization,
             qualification=qualification,

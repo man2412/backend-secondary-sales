@@ -17,7 +17,6 @@ class MasterRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID | None,
         q: str | None,
         active_only: bool,
         limit: int,
@@ -25,9 +24,6 @@ class MasterRepository:
     ) -> tuple[Sequence[State], int]:
         base = select(State)
         count_q = select(func.count()).select_from(State)
-        if company_id is not None:
-            base = base.where(State.company_id == company_id)
-            count_q = count_q.where(State.company_id == company_id)
         if active_only:
             base = base.where(State.is_active.is_(True))
             count_q = count_q.where(State.is_active.is_(True))
@@ -40,8 +36,8 @@ class MasterRepository:
         rows = (await db.execute(base)).scalars().all()
         return rows, int(total)
 
-    async def create_state(self, db: AsyncSession, *, company_id: uuid.UUID, name: str, code: str | None) -> State:
-        row = State(company_id=company_id, name=name, code=code, is_active=True)
+    async def create_state(self, db: AsyncSession, *, name: str, code: str | None) -> State:
+        row = State(name=name, code=code, is_active=True)
         db.add(row)
         await db.flush()
         await db.refresh(row)
@@ -68,7 +64,6 @@ class MasterRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID | None,
         q: str | None,
         active_only: bool,
         limit: int,
@@ -76,9 +71,6 @@ class MasterRepository:
     ) -> tuple[Sequence[Division], int]:
         base = select(Division)
         count_q = select(func.count()).select_from(Division)
-        if company_id is not None:
-            base = base.where(Division.company_id == company_id)
-            count_q = count_q.where(Division.company_id == company_id)
         if active_only:
             base = base.where(Division.is_active.is_(True))
             count_q = count_q.where(Division.is_active.is_(True))
@@ -92,9 +84,9 @@ class MasterRepository:
         return rows, int(total)
 
     async def create_division(
-        self, db: AsyncSession, *, company_id: uuid.UUID, name: str, code: str | None
+        self, db: AsyncSession, *, name: str, code: str | None
     ) -> Division:
-        row = Division(company_id=company_id, name=name, code=code, is_active=True)
+        row = Division(name=name, code=code, is_active=True)
         db.add(row)
         await db.flush()
         await db.refresh(row)
@@ -123,17 +115,13 @@ class MasterRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID | None,
         q: str | None,
         active_only: bool,
         limit: int,
         offset: int,
     ) -> tuple[Sequence[Headquarter], int]:
-        base = select(Headquarter).join(State, Headquarter.state_id == State.id)
-        count_q = select(func.count()).select_from(Headquarter).join(State, Headquarter.state_id == State.id)
-        if company_id is not None:
-            base = base.where(State.company_id == company_id)
-            count_q = count_q.where(State.company_id == company_id)
+        base = select(Headquarter)
+        count_q = select(func.count()).select_from(Headquarter)
         if active_only:
             base = base.where(Headquarter.is_active.is_(True))
             count_q = count_q.where(Headquarter.is_active.is_(True))
@@ -178,27 +166,14 @@ class MasterRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID | None,
         q: str | None,
         headquarter_id: uuid.UUID | None,
         active_only: bool,
         limit: int,
         offset: int,
     ) -> tuple[Sequence[Location], int]:
-        base = (
-            select(Location)
-            .join(Headquarter, Location.headquarter_id == Headquarter.id)
-            .join(State, Headquarter.state_id == State.id)
-        )
-        count_q = (
-            select(func.count())
-            .select_from(Location)
-            .join(Headquarter, Location.headquarter_id == Headquarter.id)
-            .join(State, Headquarter.state_id == State.id)
-        )
-        if company_id is not None:
-            base = base.where(State.company_id == company_id)
-            count_q = count_q.where(State.company_id == company_id)
+        base = select(Location)
+        count_q = select(func.count()).select_from(Location)
         if active_only:
             base = base.where(Location.is_active.is_(True))
             count_q = count_q.where(Location.is_active.is_(True))
@@ -246,18 +221,14 @@ class MasterRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID | None,
         q: str | None,
         division_id: uuid.UUID | None,
         active_only: bool,
         limit: int,
         offset: int,
     ) -> tuple[Sequence[Product], int]:
-        base = select(Product).join(Division, Product.division_id == Division.id)
-        count_q = select(func.count()).select_from(Product).join(Division, Product.division_id == Division.id)
-        if company_id is not None:
-            base = base.where(Division.company_id == company_id)
-            count_q = count_q.where(Division.company_id == company_id)
+        base = select(Product)
+        count_q = select(func.count()).select_from(Product)
         if active_only:
             base = base.where(Product.is_active.is_(True))
             count_q = count_q.where(Product.is_active.is_(True))

@@ -23,20 +23,6 @@ class MasterService:
     def __init__(self, repo: MasterRepository | None = None) -> None:
         self._repo = repo or MasterRepository()
 
-    def _scope_list(self, user: User, company_id_query: uuid.UUID | None) -> uuid.UUID:
-        """List filter: always one company — the user's company, or SUPER_ADMIN must pass company_id."""
-        if user.role == UserRole.SUPER_ADMIN:
-            if company_id_query is None:
-                raise ValueError("company_id is required")
-            return company_id_query
-        return user.company_id
-
-    def _scope_single(self, user: User) -> uuid.UUID | None:
-        """Single-row read: None means any company (SUPER_ADMIN); else user's company."""
-        if user.role == UserRole.SUPER_ADMIN:
-            return None
-        return user.company_id
-
     def _ensure_super_admin(self, user: User) -> None:
         if user.role != UserRole.SUPER_ADMIN:
             raise PermissionError("Only SUPER_ADMIN can modify master data")
@@ -48,17 +34,14 @@ class MasterService:
         db: AsyncSession,
         user: User,
         *,
-        company_id_query: uuid.UUID | None,
         q: str | None,
         page: int,
         per_page: int,
         include_inactive: bool,
     ) -> tuple[list, int]:
-        scope = self._scope_list(user, company_id_query)
         offset = (page - 1) * per_page
         rows, total = await self._repo.list_states(
             db,
-            company_id=scope,
             q=q,
             active_only=not include_inactive,
             limit=per_page,
@@ -67,26 +50,20 @@ class MasterService:
         return list(rows), total
 
     async def get_state(self, db: AsyncSession, user: User, state_id: uuid.UUID):
-        scope = self._scope_single(user)
         row = await self._repo.get_state(db, state_id)
         if row is None:
-            return None
-        if scope is not None and row.company_id != scope:
             return None
         return row
 
     async def create_state(self, db: AsyncSession, user: User, body: StateCreate):
         self._ensure_super_admin(user)
-        row = await self._repo.create_state(db, company_id=body.company_id, name=body.name, code=body.code)
+        row = await self._repo.create_state(db, name=body.name, code=body.code)
         return row
 
     async def update_state(self, db: AsyncSession, user: User, state_id: uuid.UUID, body: StateUpdate):
         self._ensure_super_admin(user)
         row = await self._repo.get_state(db, state_id)
         if row is None:
-            raise ValueError("State not found")
-        scope = self._scope_single(user)
-        if scope is not None and row.company_id != scope:
             raise ValueError("State not found")
         data = body.model_dump(exclude_unset=True)
         if not data:
@@ -106,17 +83,14 @@ class MasterService:
         db: AsyncSession,
         user: User,
         *,
-        company_id_query: uuid.UUID | None,
         q: str | None,
         page: int,
         per_page: int,
         include_inactive: bool,
     ) -> tuple[list, int]:
-        scope = self._scope_list(user, company_id_query)
         offset = (page - 1) * per_page
         rows, total = await self._repo.list_divisions(
             db,
-            company_id=scope,
             q=q,
             active_only=not include_inactive,
             limit=per_page,
@@ -125,25 +99,19 @@ class MasterService:
         return list(rows), total
 
     async def get_division(self, db: AsyncSession, user: User, division_id: uuid.UUID):
-        scope = self._scope_single(user)
         row = await self._repo.get_division(db, division_id)
         if row is None:
-            return None
-        if scope is not None and row.company_id != scope:
             return None
         return row
 
     async def create_division(self, db: AsyncSession, user: User, body: DivisionCreate):
         self._ensure_super_admin(user)
-        return await self._repo.create_division(db, company_id=body.company_id, name=body.name, code=body.code)
+        return await self._repo.create_division(db, name=body.name, code=body.code)
 
     async def update_division(self, db: AsyncSession, user: User, division_id: uuid.UUID, body: DivisionUpdate):
         self._ensure_super_admin(user)
         row = await self._repo.get_division(db, division_id)
         if row is None:
-            raise ValueError("Division not found")
-        scope = self._scope_single(user)
-        if scope is not None and row.company_id != scope:
             raise ValueError("Division not found")
         data = body.model_dump(exclude_unset=True)
         if not data:
@@ -159,17 +127,14 @@ class MasterService:
         db: AsyncSession,
         user: User,
         *,
-        company_id_query: uuid.UUID | None,
         q: str | None,
         page: int,
         per_page: int,
         include_inactive: bool,
     ) -> tuple[list, int]:
-        scope = self._scope_list(user, company_id_query)
         offset = (page - 1) * per_page
         rows, total = await self._repo.list_headquarters(
             db,
-            company_id=scope,
             q=q,
             active_only=not include_inactive,
             limit=per_page,
@@ -178,14 +143,8 @@ class MasterService:
         return list(rows), total
 
     async def get_headquarter(self, db: AsyncSession, user: User, hq_id: uuid.UUID):
-        scope = self._scope_single(user)
         row = await self._repo.get_headquarter(db, hq_id)
         if row is None:
-            return None
-        st = await self._repo.get_state(db, row.state_id)
-        if st is None:
-            return None
-        if scope is not None and st.company_id != scope:
             return None
         return row
 
@@ -195,8 +154,6 @@ class MasterService:
         div = await self._repo.get_division(db, body.division_id)
         if st is None or div is None:
             raise ValueError("State or division not found")
-        if st.company_id != div.company_id:
-            raise ValueError("State and division must belong to the same company")
         return await self._repo.create_headquarter(
             db, state_id=body.state_id, division_id=body.division_id, name=body.name, code=body.code
         )
@@ -208,9 +165,6 @@ class MasterService:
             raise ValueError("Headquarter not found")
         st = await self._repo.get_state(db, row.state_id)
         if st is None:
-            raise ValueError("Headquarter not found")
-        scope = self._scope_single(user)
-        if scope is not None and st.company_id != scope:
             raise ValueError("Headquarter not found")
         data = body.model_dump(exclude_unset=True)
         if not data:
@@ -226,18 +180,15 @@ class MasterService:
         db: AsyncSession,
         user: User,
         *,
-        company_id_query: uuid.UUID | None,
         q: str | None,
         headquarter_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
     ) -> tuple[list, int]:
-        scope = self._scope_list(user, company_id_query)
         offset = (page - 1) * per_page
         rows, total = await self._repo.list_locations(
             db,
-            company_id=scope,
             q=q,
             headquarter_id=headquarter_id,
             active_only=not include_inactive,
@@ -247,17 +198,8 @@ class MasterService:
         return list(rows), total
 
     async def get_location(self, db: AsyncSession, user: User, location_id: uuid.UUID):
-        scope = self._scope_single(user)
         row = await self._repo.get_location(db, location_id)
         if row is None:
-            return None
-        hq = await self._repo.get_headquarter(db, row.headquarter_id)
-        if hq is None:
-            return None
-        st = await self._repo.get_state(db, hq.state_id)
-        if st is None:
-            return None
-        if scope is not None and st.company_id != scope:
             return None
         return row
 
@@ -281,9 +223,6 @@ class MasterService:
         st = await self._repo.get_state(db, hq.state_id)
         if st is None:
             raise ValueError("Location not found")
-        scope = self._scope_single(user)
-        if scope is not None and st.company_id != scope:
-            raise ValueError("Location not found")
         data = body.model_dump(exclude_unset=True)
         if not data:
             raise ValueError("No fields to update")
@@ -298,18 +237,15 @@ class MasterService:
         db: AsyncSession,
         user: User,
         *,
-        company_id_query: uuid.UUID | None,
         q: str | None,
         division_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
     ) -> tuple[list, int]:
-        scope = self._scope_list(user, company_id_query)
         offset = (page - 1) * per_page
         rows, total = await self._repo.list_products(
             db,
-            company_id=scope,
             q=q,
             division_id=division_id,
             active_only=not include_inactive,
@@ -319,14 +255,8 @@ class MasterService:
         return list(rows), total
 
     async def get_product(self, db: AsyncSession, user: User, product_id: uuid.UUID):
-        scope = self._scope_single(user)
         row = await self._repo.get_product(db, product_id)
         if row is None:
-            return None
-        div = await self._repo.get_division(db, row.division_id)
-        if div is None:
-            return None
-        if scope is not None and div.company_id != scope:
             return None
         return row
 
@@ -353,9 +283,6 @@ class MasterService:
             raise ValueError("Product not found")
         div = await self._repo.get_division(db, row.division_id)
         if div is None:
-            raise ValueError("Product not found")
-        scope = self._scope_single(user)
-        if scope is not None and div.company_id != scope:
             raise ValueError("Product not found")
         data = body.model_dump(exclude_unset=True)
         if not data:

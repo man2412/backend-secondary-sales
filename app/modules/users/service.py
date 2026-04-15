@@ -19,7 +19,6 @@ class UserService:
         sid = data.supabase_id if data.supabase_id is not None else uuid.uuid4()
         user = User(
             supabase_id=sid,
-            company_id=data.company_id,
             division_id=data.division_id,
             employee_code=data.employee_code,
             full_name=data.full_name,
@@ -44,11 +43,9 @@ class UserService:
             )
             return [row[0] for row in r.fetchall()]
         if user.role in (UserRole.SALES_DIRECTOR,):
-            return list(await self._repo.list_mr_ids_for_company(db, user.company_id))
+            return list(await self._repo.list_mr_ids_for_company(db))
         if user.role in (UserRole.STATE_HEAD, UserRole.RSM, UserRole.DEPUTY_RSM) and user.state_id:
-            return list(
-                await self._repo.list_mr_ids_for_state_scope(db, user.company_id, user.state_id)
-            )
+            return list(await self._repo.list_mr_ids_for_state_scope(db, user.state_id))
         if user.role == UserRole.ASM:
             return list(await self._repo.list_mr_ids_under_manager(db, user.id))
         return []
@@ -58,7 +55,6 @@ class UserService:
         db: AsyncSession,
         user: User,
         *,
-        company_id_query: uuid.UUID | None,
         q: str | None,
         page: int,
         per_page: int,
@@ -66,13 +62,9 @@ class UserService:
     ) -> tuple[list[User], int]:
         if user.role != UserRole.SUPER_ADMIN:
             raise PermissionError("Only SUPER_ADMIN can list company users")
-        if company_id_query is None:
-            raise ValueError("company_id is required for SUPER_ADMIN")
-        company_id = company_id_query
         offset = (page - 1) * per_page
         rows, total = await self._repo.list_users(
             db,
-            company_id=company_id,
             q=q,
             active_only=not include_inactive,
             limit=per_page,
@@ -97,8 +89,8 @@ class UserService:
             rto = data["reports_to"]
             if rto is not None:
                 mgr = await self._repo.get_by_id(db, rto)
-                if mgr is None or mgr.company_id != target.company_id:
-                    raise ValueError("reports_to must be a user in the same company")
+                if mgr is None:
+                    raise ValueError("reports_to must be a valid user")
                 if mgr.id == target.id:
                     raise ValueError("Cannot report to self")
         return await self._repo.patch_user(db, target, data)

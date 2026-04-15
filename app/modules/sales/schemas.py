@@ -16,7 +16,6 @@ class SecondarySaleOut(BaseModel):
     headquarter_id: uuid.UUID
     location_id: uuid.UUID
     state_id: uuid.UUID
-    company_id: uuid.UUID
     sale_date: date
     sale_qty: int
     free_qty: int

@@ -23,7 +23,6 @@ async def list_secondary_sales(
     current: Annotated[User, Depends(get_current_user)],
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
-    company_id: Annotated[UUID | None, Query(description="Required for SUPER_ADMIN; others use their company")] = None,
     sale_date: Annotated[date | None, Query()] = None,
     mr_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
@@ -34,7 +33,6 @@ async def list_secondary_sales(
             current,
             page=page,
             per_page=per_page,
-            company_id_query=company_id,
             sale_date=sale_date,
             mr_id_filter=mr_id,
             include_inactive=include_inactive,
@@ -61,10 +59,9 @@ async def get_secondary_sale(
     sale_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current: Annotated[User, Depends(get_current_user)],
-    company_id: Annotated[UUID | None, Query(description="Required for SUPER_ADMIN; others use their company")] = None,
 ) -> dict:
     try:
-        row = await SalesService().get_sale(db, current, sale_id, company_id_query=company_id)
+        row = await SalesService().get_sale(db, current, sale_id)
     except PermissionError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
     except ValueError as e:

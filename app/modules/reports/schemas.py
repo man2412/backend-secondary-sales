@@ -9,7 +9,6 @@ TimeseriesBucket = Literal["day", "week", "month"]
 
 
 class AnalyticsFiltersApplied(BaseModel):
-    company_id: uuid.UUID | None = None
     mr_id: uuid.UUID | None = None
     doctor_id: uuid.UUID | None = None
     headquarter_id: uuid.UUID | None = None

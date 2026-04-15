@@ -14,13 +14,6 @@ from app.modules.doctors.service import DoctorsService
 router = APIRouter(prefix="/doctors", tags=["doctors"])
 
 
-async def _catch_list_scope(awaitable):
-    try:
-        return await awaitable
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
-
-
 def _paginated(items: list, *, page: int, per_page: int, total: int) -> dict:
     total_pages = (total + per_page - 1) // per_page if total else 0
     data = [x.model_dump(mode="json") for x in items]
@@ -41,23 +34,19 @@ async def list_doctors(
     current: Annotated[User, Depends(get_current_user)],
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
-    company_id: Annotated[UUID | None, Query()] = None,
     q: Annotated[str | None, Query(description="Search: name/phone")] = None,
     location_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = DoctorsService()
-    rows, total = await _catch_list_scope(
-        svc.list_doctors(
-            db,
-            current,
-            company_id_query=company_id,
-            q=q,
-            location_id=location_id,
-            page=page,
-            per_page=per_page,
-            include_inactive=include_inactive,
-        )
+    rows, total = await svc.list_doctors(
+        db,
+        current,
+        q=q,
+        location_id=location_id,
+        page=page,
+        per_page=per_page,
+        include_inactive=include_inactive,
     )
     return _paginated(rows, page=page, per_page=per_page, total=total)
 

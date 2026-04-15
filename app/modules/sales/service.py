@@ -39,15 +39,6 @@ class SalesService:
         self._doctors = DoctorsRepository()
         self._stockists = StockistsRepository()
 
-    def _scope_sales_company(self, user: User, company_id_query: uuid.UUID | None) -> uuid.UUID:
-        if user.role == UserRole.SUPER_ADMIN:
-            if company_id_query is None:
-                raise ValueError("company_id is required")
-            return company_id_query
-        if company_id_query is not None and company_id_query != user.company_id:
-            raise PermissionError("company_id not allowed for this role")
-        return user.company_id
-
     async def _has_product_alloc(
         self, db: AsyncSession, mr_id: uuid.UUID, product_id: uuid.UUID
     ) -> bool:
@@ -106,7 +97,6 @@ class SalesService:
             "headquarter_id": row.headquarter_id,
             "location_id": row.location_id,
             "state_id": row.state_id,
-            "company_id": row.company_id,
             "sale_date": row.sale_date,
             "sale_qty": row.sale_qty,
             "free_qty": row.free_qty,
@@ -128,12 +118,10 @@ class SalesService:
         *,
         page: int,
         per_page: int,
-        company_id_query: uuid.UUID | None,
         sale_date: date | None,
         mr_id_filter: uuid.UUID | None,
         include_inactive: bool,
     ) -> tuple[list[dict], int]:
-        company_id = self._scope_sales_company(user, company_id_query)
         visible = await UserService().get_visible_mr_ids(db, user)
         if not visible:
             return [], 0
@@ -146,7 +134,6 @@ class SalesService:
         rows, total = await self._repo.list_sales(
             db,
             mr_ids=mr_ids,
-            company_id=company_id,
             sale_date=sale_date,
             active_only=not include_inactive,
             limit=per_page,
@@ -160,14 +147,10 @@ class SalesService:
         user: User,
         sale_id: uuid.UUID,
         *,
-        company_id_query: uuid.UUID | None,
     ) -> dict | None:
-        company_id = self._scope_sales_company(user, company_id_query)
         visible = await UserService().get_visible_mr_ids(db, user)
         row = await self._repo.get_sale(db, sale_id)
         if row is None:
-            return None
-        if row.company_id != company_id:
             return None
         if row.mr_id not in visible:
             return None
@@ -191,11 +174,7 @@ class SalesService:
         ctx = await self._repo.get_location_context(db, body.location_id)
         if ctx is None:
             raise ValueError("Location not found")
-        state_id, company_id, hq_id, division_id = ctx
-        if company_id != mr_user.company_id:
-            raise ValueError("Location not in the MR's company")
-        if user.role == UserRole.MR and company_id != user.company_id:
-            raise ValueError("Location not in your company")
+        state_id, hq_id, division_id = ctx
         loc_row = await self._master.get_location(db, body.location_id)
         if loc_row is None or not loc_row.is_active:
             raise ValueError("Location not found")
@@ -205,7 +184,7 @@ class SalesService:
         if product.division_id != division_id:
             raise ValueError("Product division does not match location division")
         div = await self._master.get_division(db, division_id)
-        if div is None or div.company_id != mr_user.company_id:
+        if div is None:
             raise ValueError("Invalid division for sale")
         if not await self._has_product_alloc(db, mr_id, body.product_id):
             raise ValueError("Product not allocated to you")
@@ -213,13 +192,13 @@ class SalesService:
             raise ValueError("Location not allocated to you")
         if body.doctor_id is not None:
             doc = await self._doctors.get_doctor(db, body.doctor_id)
-            if doc is None or not doc.is_active or doc.company_id != mr_user.company_id:
+            if doc is None or not doc.is_active:
                 raise ValueError("Doctor not found")
             if not await self._has_doctor_alloc(db, mr_id, body.doctor_id, product.division_id):
                 raise ValueError("Doctor not allocated for this product division")
         if body.medical_store_id is not None:
             st = await self._stockists.get_medical_store(db, body.medical_store_id)
-            if st is None or not st.is_active or st.company_id != mr_user.company_id:
+            if st is None or not st.is_active:
                 raise ValueError("Medical store not found")
             if not await self._has_store_alloc(db, mr_id, body.medical_store_id):
                 raise ValueError("Medical store not allocated to you")
@@ -236,7 +215,6 @@ class SalesService:
             headquarter_id=hq_id,
             location_id=body.location_id,
             state_id=state_id,
-            company_id=company_id,
             sale_date=body.sale_date,
             sale_qty=body.sale_qty,
             free_qty=body.free_qty,

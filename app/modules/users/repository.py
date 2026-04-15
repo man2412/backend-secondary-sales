@@ -45,13 +45,10 @@ class UserRepository:
         result = await db.execute(q, {"mid": str(manager_id)})
         return [uuid.UUID(str(row[0])) for row in result.fetchall()]
 
-    async def list_mr_ids_for_state_scope(
-        self, db: AsyncSession, company_id: uuid.UUID, state_id: uuid.UUID
-    ) -> Sequence[uuid.UUID]:
-        """MRs whose user.state_id matches or who report up within same state (simplified: state_id on MR)."""
+    async def list_mr_ids_for_state_scope(self, db: AsyncSession, state_id: uuid.UUID) -> Sequence[uuid.UUID]:
+        """MRs whose user.state_id matches (state_id on MR)."""
         result = await db.execute(
             select(User.id).where(
-                User.company_id == company_id,
                 User.role == UserRole.MR,
                 User.is_active.is_(True),
                 User.state_id == state_id,
@@ -59,10 +56,9 @@ class UserRepository:
         )
         return [row[0] for row in result.fetchall()]
 
-    async def list_mr_ids_for_company(self, db: AsyncSession, company_id: uuid.UUID) -> Sequence[uuid.UUID]:
+    async def list_mr_ids_for_company(self, db: AsyncSession) -> Sequence[uuid.UUID]:
         result = await db.execute(
             select(User.id).where(
-                User.company_id == company_id,
                 User.role == UserRole.MR,
                 User.is_active.is_(True),
             )
@@ -73,14 +69,13 @@ class UserRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID,
         q: str | None,
         active_only: bool,
         limit: int,
         offset: int,
     ) -> tuple[Sequence[User], int]:
-        base = select(User).where(User.company_id == company_id)
-        count_q = select(func.count()).select_from(User).where(User.company_id == company_id)
+        base = select(User)
+        count_q = select(func.count()).select_from(User)
         if q is not None and q.strip():
             term = f"%{q.strip()}%"
             base = base.where(

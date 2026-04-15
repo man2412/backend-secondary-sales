@@ -131,13 +131,10 @@ class AllocationsService:
         self, db: AsyncSession, user: User, mr_id: uuid.UUID, body: LocationAllocCreate
     ) -> LocationAllocOut:
         self._require_can_manage_allocations(user)
-        mr = await self._require_view_mr(db, user, mr_id)
+        await self._require_view_mr(db, user, mr_id)
         loc = await self._master.get_location(db, body.location_id)
         if loc is None or not loc.is_active:
             raise ValueError("Location not found")
-        lc = await self._stockists.location_company_id(db, body.location_id)
-        if lc is None or lc != mr.company_id:
-            raise ValueError("Location not in MR company")
         row = await self._repo.upsert_location_alloc(
             db, mr_id=mr_id, location_id=body.location_id, allocated_by=user.id
         )
@@ -155,15 +152,13 @@ class AllocationsService:
         self, db: AsyncSession, user: User, mr_id: uuid.UUID, body: DoctorAllocCreate
     ) -> DoctorAllocOut:
         self._require_can_manage_allocations(user)
-        mr = await self._require_view_mr(db, user, mr_id)
+        await self._require_view_mr(db, user, mr_id)
         doc = await self._doctors.get_doctor(db, body.doctor_id)
         if doc is None or not doc.is_active:
             raise ValueError("Doctor not found")
-        if doc.company_id != mr.company_id:
-            raise ValueError("Doctor not in MR company")
         div = await self._master.get_division(db, body.division_id)
-        if div is None or not div.is_active or div.company_id != mr.company_id:
-            raise ValueError("Division not valid for MR company")
+        if div is None or not div.is_active:
+            raise ValueError("Division not found")
         row = await self._repo.upsert_doctor_alloc(
             db,
             mr_id=mr_id,
@@ -187,13 +182,10 @@ class AllocationsService:
         self, db: AsyncSession, user: User, mr_id: uuid.UUID, body: ProductAllocCreate
     ) -> ProductAllocOut:
         self._require_can_manage_allocations(user)
-        mr = await self._require_view_mr(db, user, mr_id)
+        await self._require_view_mr(db, user, mr_id)
         pr = await self._master.get_product(db, body.product_id)
         if pr is None or not pr.is_active:
             raise ValueError("Product not found")
-        div = await self._master.get_division(db, pr.division_id)
-        if div is None or div.company_id != mr.company_id:
-            raise ValueError("Product not in MR company")
         row = await self._repo.upsert_product_alloc(
             db, mr_id=mr_id, product_id=body.product_id, allocated_by=user.id
         )
@@ -209,12 +201,10 @@ class AllocationsService:
 
     async def add_store(self, db: AsyncSession, user: User, mr_id: uuid.UUID, body: StoreAllocCreate) -> StoreAllocOut:
         self._require_can_manage_allocations(user)
-        mr = await self._require_view_mr(db, user, mr_id)
+        await self._require_view_mr(db, user, mr_id)
         st = await self._stockists.get_medical_store(db, body.medical_store_id)
         if st is None or not st.is_active:
             raise ValueError("Medical store not found")
-        if st.company_id != mr.company_id:
-            raise ValueError("Medical store not in MR company")
         row = await self._repo.upsert_store_alloc(
             db, mr_id=mr_id, medical_store_id=body.medical_store_id, allocated_by=user.id
         )

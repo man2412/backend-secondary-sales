@@ -10,9 +10,6 @@ class SuperStockist(Base, TimestampMixin):
     __tablename__ = "super_stockists"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    company_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("companies.id"), nullable=False
-    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     unique_code: Mapped[str | None] = mapped_column(String(100))
     gst_number: Mapped[str | None] = mapped_column(String(20))
@@ -40,9 +37,6 @@ class Stockist(Base, TimestampMixin):
     __tablename__ = "stockists"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    company_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("companies.id"), nullable=False
-    )
     super_stockist_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("super_stockists.id")
     )
@@ -73,9 +67,6 @@ class MedicalStore(Base, TimestampMixin):
     __tablename__ = "medical_stores"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    company_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("companies.id"), nullable=False
-    )
     stockist_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("stockists.id"))
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     unique_code: Mapped[str | None] = mapped_column(String(100))

@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 
 
 class StateCreate(BaseModel):
-    company_id: uuid.UUID
     name: str = Field(..., min_length=1, max_length=255)
     code: str | None = Field(None, max_length=10)
 
@@ -22,7 +21,6 @@ class StateOut(BaseModel):
     model_config = {"from_attributes": True}
 
     id: uuid.UUID
-    company_id: uuid.UUID
     name: str
     code: str | None
     is_active: bool
@@ -34,7 +32,6 @@ class StateOut(BaseModel):
 
 
 class DivisionCreate(BaseModel):
-    company_id: uuid.UUID
     name: str = Field(..., min_length=1, max_length=255)
     code: str = Field(..., min_length=1, max_length=50)
 
@@ -49,7 +46,6 @@ class DivisionOut(BaseModel):
     model_config = {"from_attributes": True}
 
     id: uuid.UUID
-    company_id: uuid.UUID
     name: str
     code: str | None
     is_active: bool

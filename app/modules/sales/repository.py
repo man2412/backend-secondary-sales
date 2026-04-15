@@ -12,12 +12,11 @@ from app.models.sale import SecondarySale
 class SalesRepository:
     async def get_location_context(
         self, db: AsyncSession, location_id: uuid.UUID
-    ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID] | None:
-        """Returns (state_id, company_id, headquarter_id, division_id)."""
+    ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID] | None:
+        """Returns (state_id, headquarter_id, division_id)."""
         stmt = (
             select(
                 State.id,
-                State.company_id,
                 Headquarter.id,
                 Headquarter.division_id,
             )
@@ -30,7 +29,7 @@ class SalesRepository:
         row = r.one_or_none()
         if row is None:
             return None
-        return (row[0], row[1], row[2], row[3])
+        return (row[0], row[1], row[2])
 
     async def get_sale(self, db: AsyncSession, sale_id: uuid.UUID) -> SecondarySale | None:
         r = await db.execute(select(SecondarySale).where(SecondarySale.id == sale_id))
@@ -41,24 +40,13 @@ class SalesRepository:
         db: AsyncSession,
         *,
         mr_ids: list[uuid.UUID],
-        company_id: uuid.UUID,
         sale_date: date | None,
         active_only: bool,
         limit: int,
         offset: int,
     ) -> tuple[Sequence[SecondarySale], int]:
-        base = select(SecondarySale).where(
-            SecondarySale.mr_id.in_(mr_ids),
-            SecondarySale.company_id == company_id,
-        )
-        count_q = (
-            select(func.count())
-            .select_from(SecondarySale)
-            .where(
-                SecondarySale.mr_id.in_(mr_ids),
-                SecondarySale.company_id == company_id,
-            )
-        )
+        base = select(SecondarySale).where(SecondarySale.mr_id.in_(mr_ids))
+        count_q = select(func.count()).select_from(SecondarySale).where(SecondarySale.mr_id.in_(mr_ids))
         if sale_date is not None:
             base = base.where(SecondarySale.sale_date == sale_date)
             count_q = count_q.where(SecondarySale.sale_date == sale_date)
@@ -93,7 +81,6 @@ class SalesRepository:
         headquarter_id: uuid.UUID,
         location_id: uuid.UUID,
         state_id: uuid.UUID,
-        company_id: uuid.UUID,
         sale_date: date,
         sale_qty: int,
         free_qty: int,
@@ -112,7 +99,6 @@ class SalesRepository:
             headquarter_id=headquarter_id,
             location_id=location_id,
             state_id=state_id,
-            company_id=company_id,
             sale_date=sale_date,
             sale_qty=sale_qty,
             free_qty=free_qty,

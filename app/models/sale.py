@@ -24,7 +24,6 @@ class SecondarySale(Base, TimestampMixin):
     )
     location_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("locations.id"), nullable=False)
     state_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("states.id"), nullable=False)
-    company_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("companies.id"), nullable=False)
     sale_date: Mapped[date] = mapped_column(Date, nullable=False)
     sale_qty: Mapped[int] = mapped_column(Integer, nullable=False)
     free_qty: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

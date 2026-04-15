@@ -10,17 +10,6 @@ from app.models.stockist import MedicalStore, Stockist, SuperStockist
 
 
 class StockistsRepository:
-    async def location_company_id(self, db: AsyncSession, location_id: uuid.UUID) -> uuid.UUID | None:
-        r = await db.execute(
-            select(State.company_id)
-            .select_from(Location)
-            .join(Headquarter, Location.headquarter_id == Headquarter.id)
-            .join(State, Headquarter.state_id == State.id)
-            .where(Location.id == location_id)
-        )
-        row = r.one_or_none()
-        return row[0] if row else None
-
     # --- Super stockist ---
 
     async def get_super_stockist(self, db: AsyncSession, entity_id: uuid.UUID) -> SuperStockist | None:
@@ -31,7 +20,6 @@ class StockistsRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID | None,
         q: str | None,
         location_id: uuid.UUID | None,
         active_only: bool,
@@ -40,9 +28,6 @@ class StockistsRepository:
     ) -> tuple[Sequence[SuperStockist], int]:
         base = select(SuperStockist)
         count_q = select(func.count()).select_from(SuperStockist)
-        if company_id is not None:
-            base = base.where(SuperStockist.company_id == company_id)
-            count_q = count_q.where(SuperStockist.company_id == company_id)
         if active_only:
             base = base.where(SuperStockist.is_active.is_(True))
             count_q = count_q.where(SuperStockist.is_active.is_(True))
@@ -72,7 +57,6 @@ class StockistsRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID,
         name: str,
         unique_code: str | None,
         gst_number: str | None,
@@ -82,7 +66,6 @@ class StockistsRepository:
         location_id: uuid.UUID | None,
     ) -> SuperStockist:
         row = SuperStockist(
-            company_id=company_id,
             name=name,
             unique_code=unique_code,
             gst_number=gst_number,
@@ -141,7 +124,6 @@ class StockistsRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID | None,
         q: str | None,
         super_stockist_id: uuid.UUID | None,
         location_id: uuid.UUID | None,
@@ -151,9 +133,6 @@ class StockistsRepository:
     ) -> tuple[Sequence[Stockist], int]:
         base = select(Stockist)
         count_q = select(func.count()).select_from(Stockist)
-        if company_id is not None:
-            base = base.where(Stockist.company_id == company_id)
-            count_q = count_q.where(Stockist.company_id == company_id)
         if active_only:
             base = base.where(Stockist.is_active.is_(True))
             count_q = count_q.where(Stockist.is_active.is_(True))
@@ -186,7 +165,6 @@ class StockistsRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID,
         super_stockist_id: uuid.UUID | None,
         name: str,
         unique_code: str | None,
@@ -197,7 +175,6 @@ class StockistsRepository:
         location_id: uuid.UUID | None,
     ) -> Stockist:
         row = Stockist(
-            company_id=company_id,
             super_stockist_id=super_stockist_id,
             name=name,
             unique_code=unique_code,
@@ -260,7 +237,6 @@ class StockistsRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID | None,
         q: str | None,
         stockist_id: uuid.UUID | None,
         location_id: uuid.UUID | None,
@@ -271,9 +247,6 @@ class StockistsRepository:
     ) -> tuple[Sequence[MedicalStore], int]:
         base = select(MedicalStore)
         count_q = select(func.count()).select_from(MedicalStore)
-        if company_id is not None:
-            base = base.where(MedicalStore.company_id == company_id)
-            count_q = count_q.where(MedicalStore.company_id == company_id)
         if active_only:
             base = base.where(MedicalStore.is_active.is_(True))
             count_q = count_q.where(MedicalStore.is_active.is_(True))
@@ -313,7 +286,6 @@ class StockistsRepository:
         self,
         db: AsyncSession,
         *,
-        company_id: uuid.UUID,
         stockist_id: uuid.UUID | None,
         name: str,
         unique_code: str | None,
@@ -324,7 +296,6 @@ class StockistsRepository:
         location_id: uuid.UUID | None,
     ) -> MedicalStore:
         row = MedicalStore(
-            company_id=company_id,
             stockist_id=stockist_id,
             name=name,
             unique_code=unique_code,

@@ -33,7 +33,6 @@ async def list_company_users(
     current: Annotated[User, Depends(get_current_user)],
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
-    company_id: Annotated[UUID | None, Query()] = None,
     q: Annotated[str | None, Query(description="Search: name/email/phone/employee_code")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
@@ -41,7 +40,6 @@ async def list_company_users(
         rows, total = await UserService().list_company_users(
             db,
             current,
-            company_id_query=company_id,
             q=q,
             page=page,
             per_page=per_page,
@@ -129,9 +127,6 @@ async def get_user(
     user = await repo.get_by_id(db, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    # Scope: same company; SUPER_ADMIN any
-    if current.role != UserRole.SUPER_ADMIN and user.company_id != current.company_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Out of scope")
     return ok(data=UserOut.model_validate(user).model_dump(mode="json"))
 
 
@@ -176,7 +171,5 @@ async def get_reporting_chain(
     user = await repo.get_by_id(db, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    if current.role != UserRole.SUPER_ADMIN and user.company_id != current.company_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Out of scope")
     chain = await repo.reporting_chain(db, user_id)
     return ok(data=chain)

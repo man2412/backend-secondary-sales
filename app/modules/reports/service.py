@@ -42,17 +42,6 @@ class ReportsService:
         if span > MAX_REPORT_RANGE_DAYS:
             raise ValueError(f"Date range cannot exceed {MAX_REPORT_RANGE_DAYS} days")
 
-    async def _scope_company_id(
-        self, db: AsyncSession, user: User, company_id_query: uuid.UUID | None
-    ) -> uuid.UUID:
-        if user.role == UserRole.SUPER_ADMIN:
-            if company_id_query is None:
-                raise ValueError("company_id is required")
-            return company_id_query
-        if company_id_query is not None and company_id_query != user.company_id:
-            raise PermissionError("company_id not allowed for this role")
-        return user.company_id
-
     async def _visible_mr_ids(self, db: AsyncSession, user: User) -> list[uuid.UUID]:
         return await UserService().get_visible_mr_ids(db, user)
 
@@ -64,14 +53,6 @@ class ReportsService:
         if mr_id_filter not in visible:
             raise PermissionError("Cannot report on this MR")
         return [mr_id_filter]
-
-    def _company_for_manager_pie(self, user: User, scoped_company_id: uuid.UUID | None) -> uuid.UUID:
-        """RSM/ASM pie rolls up users in one company."""
-        if user.role == UserRole.SUPER_ADMIN:
-            if scoped_company_id is None:
-                raise ValueError("company_id is required for RSM/ASM pie charts when using SUPER_ADMIN")
-            return scoped_company_id
-        return user.company_id
 
     @staticmethod
     def _parse_pie_dimensions(pie_param: str | None) -> list[str]:
@@ -116,7 +97,6 @@ class ReportsService:
         *,
         date_from: date,
         date_to: date,
-        company_id_query: uuid.UUID | None,
         include_inactive: bool,
         mr_id_filter: uuid.UUID | None,
         doctor_id: uuid.UUID | None,
@@ -130,14 +110,12 @@ class ReportsService:
         pie_param: str | None,
     ) -> SecondarySalesAnalyticsOut:
         self._validate_range(date_from, date_to)
-        company_id = await self._scope_company_id(db, user, company_id_query)
         visible = await self._visible_mr_ids(db, user)
         mr_ids = self._resolve_mr_scope(visible, mr_id_filter)
         active_only = not include_inactive
         pie_dims = self._parse_pie_dimensions(pie_param)
 
         filters = AnalyticsFiltersApplied(
-            company_id=company_id,
             mr_id=mr_id_filter,
             doctor_id=doctor_id,
             headquarter_id=headquarter_id,
@@ -152,7 +130,6 @@ class ReportsService:
             mr_ids=mr_ids,
             date_from=date_from,
             date_to=date_to,
-            company_id=company_id,
             active_only=active_only,
             doctor_id=doctor_id,
             headquarter_id=headquarter_id,
@@ -194,11 +171,9 @@ class ReportsService:
                 rows = await fn(db, **kwargs)
                 pies.append(self._pie_series(dim, rows))
             else:
-                cid = self._company_for_manager_pie(user, company_id)
                 rows = await self._repo.analytics_pie_by_manager_role(
                     db,
                     **kwargs,
-                    company_id=cid,
                     manager_role="RSM" if dim == "rsm" else "ASM",
                 )
                 pies.append(self._pie_series(dim, rows))

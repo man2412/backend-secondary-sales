@@ -33,13 +33,6 @@ router = APIRouter(tags=["master"])
 _super_admin = require_roles(UserRole.SUPER_ADMIN)
 
 
-async def _catch_list_scope(awaitable):
-    try:
-        return await awaitable
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
-
-
 def _paginated(
     items: list,
     *,
@@ -70,21 +63,17 @@ async def list_states(
     current: Annotated[User, Depends(get_current_user)],
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
-    company_id: Annotated[UUID | None, Query()] = None,
     q: Annotated[str | None, Query(description="Search by name/code")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = MasterService()
-    rows, total = await _catch_list_scope(
-        svc.list_states(
-            db,
-            current,
-            company_id_query=company_id,
-            q=q,
-            page=page,
-            per_page=per_page,
-            include_inactive=include_inactive,
-        )
+    rows, total = await svc.list_states(
+        db,
+        current,
+        q=q,
+        page=page,
+        per_page=per_page,
+        include_inactive=include_inactive,
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=StateOut)
 
@@ -154,20 +143,16 @@ async def list_divisions(
     current: Annotated[User, Depends(get_current_user)],
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
-    company_id: Annotated[UUID | None, Query()] = None,
     q: Annotated[str | None, Query(description="Search by name")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
-    rows, total = await _catch_list_scope(
-        MasterService().list_divisions(
-            db,
-            current,
-            company_id_query=company_id,
-            q=q,
-            page=page,
-            per_page=per_page,
-            include_inactive=include_inactive,
-        )
+    rows, total = await MasterService().list_divisions(
+        db,
+        current,
+        q=q,
+        page=page,
+        per_page=per_page,
+        include_inactive=include_inactive,
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=DivisionOut)
 
@@ -237,20 +222,16 @@ async def list_headquarters(
     current: Annotated[User, Depends(get_current_user)],
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
-    company_id: Annotated[UUID | None, Query()] = None,
     q: Annotated[str | None, Query(description="Search by name")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
-    rows, total = await _catch_list_scope(
-        MasterService().list_headquarters(
-            db,
-            current,
-            company_id_query=company_id,
-            q=q,
-            page=page,
-            per_page=per_page,
-            include_inactive=include_inactive,
-        )
+    rows, total = await MasterService().list_headquarters(
+        db,
+        current,
+        q=q,
+        page=page,
+        per_page=per_page,
+        include_inactive=include_inactive,
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=HeadquarterOut)
 
@@ -322,22 +303,18 @@ async def list_locations(
     current: Annotated[User, Depends(get_current_user)],
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
-    company_id: Annotated[UUID | None, Query()] = None,
     q: Annotated[str | None, Query(description="Search by name")] = None,
     headquarter_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
-    rows, total = await _catch_list_scope(
-        MasterService().list_locations(
-            db,
-            current,
-            company_id_query=company_id,
-            q=q,
-            headquarter_id=headquarter_id,
-            page=page,
-            per_page=per_page,
-            include_inactive=include_inactive,
-        )
+    rows, total = await MasterService().list_locations(
+        db,
+        current,
+        q=q,
+        headquarter_id=headquarter_id,
+        page=page,
+        per_page=per_page,
+        include_inactive=include_inactive,
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=LocationOut)
 
@@ -409,22 +386,18 @@ async def list_products(
     current: Annotated[User, Depends(get_current_user)],
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
-    company_id: Annotated[UUID | None, Query()] = None,
     q: Annotated[str | None, Query(description="Search by name")] = None,
     division_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
-    rows, total = await _catch_list_scope(
-        MasterService().list_products(
-            db,
-            current,
-            company_id_query=company_id,
-            q=q,
-            division_id=division_id,
-            page=page,
-            per_page=per_page,
-            include_inactive=include_inactive,
-        )
+    rows, total = await MasterService().list_products(
+        db,
+        current,
+        q=q,
+        division_id=division_id,
+        page=page,
+        per_page=per_page,
+        include_inactive=include_inactive,
     )
     return _paginated(rows, page=page, per_page=per_page, total=total, out_cls=ProductOut)
 

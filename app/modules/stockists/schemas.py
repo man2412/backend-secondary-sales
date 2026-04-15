@@ -8,7 +8,6 @@ class SuperStockistOut(BaseModel):
     model_config = {"from_attributes": True}
 
     id: uuid.UUID
-    company_id: uuid.UUID
     name: str
     unique_code: str | None
     gst_number: str | None
@@ -22,7 +21,6 @@ class SuperStockistOut(BaseModel):
 
 
 class SuperStockistCreate(BaseModel):
-    company_id: uuid.UUID
     name: str = Field(..., min_length=1, max_length=255)
     unique_code: str | None = None
     gst_number: str | None = None
@@ -47,7 +45,6 @@ class StockistOut(BaseModel):
     model_config = {"from_attributes": True}
 
     id: uuid.UUID
-    company_id: uuid.UUID
     super_stockist_id: uuid.UUID | None
     name: str
     unique_code: str | None
@@ -62,7 +59,6 @@ class StockistOut(BaseModel):
 
 
 class StockistCreate(BaseModel):
-    company_id: uuid.UUID
     super_stockist_id: uuid.UUID | None = None
     name: str = Field(..., min_length=1, max_length=255)
     unique_code: str | None = None
@@ -89,7 +85,6 @@ class MedicalStoreOut(BaseModel):
     model_config = {"from_attributes": True}
 
     id: uuid.UUID
-    company_id: uuid.UUID
     stockist_id: uuid.UUID | None
     name: str
     unique_code: str | None
@@ -104,7 +99,6 @@ class MedicalStoreOut(BaseModel):
 
 
 class MedicalStoreCreate(BaseModel):
-    company_id: uuid.UUID | None = None
     stockist_id: uuid.UUID | None = None
     name: str = Field(..., min_length=1, max_length=255)
     unique_code: str | None = None

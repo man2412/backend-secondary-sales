@@ -11,7 +11,6 @@ class UserOut(BaseModel):
 
     id: uuid.UUID
     supabase_id: uuid.UUID
-    company_id: uuid.UUID
     division_id: uuid.UUID | None
     employee_code: str | None
     full_name: str
@@ -26,7 +25,6 @@ class UserOut(BaseModel):
 
 
 class UserCreate(BaseModel):
-    company_id: uuid.UUID
     division_id: uuid.UUID | None = None
     employee_code: str | None = None
     full_name: str = Field(..., min_length=1, max_length=255)

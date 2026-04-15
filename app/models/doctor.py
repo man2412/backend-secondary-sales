@@ -10,9 +10,6 @@ class Doctor(Base, TimestampMixin):
     __tablename__ = "doctors"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    company_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("companies.id"), nullable=False
-    )
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     specialization: Mapped[str | None] = mapped_column(String(255))
     qualification: Mapped[str | None] = mapped_column(String(255))

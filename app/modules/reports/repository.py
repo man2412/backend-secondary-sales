@@ -18,7 +18,6 @@ class ReportsRepository:
         date_from: date,
         date_to: date,
         *,
-        company_id: uuid.UUID | None,
         active_only: bool,
         doctor_id: uuid.UUID | None,
         headquarter_id: uuid.UUID | None,
@@ -34,8 +33,6 @@ class ReportsRepository:
         ]
         if active_only:
             conds.append(SecondarySale.is_active.is_(True))
-        if company_id is not None:
-            conds.append(SecondarySale.company_id == company_id)
         if doctor_id is not None:
             conds.append(SecondarySale.doctor_id == doctor_id)
         if headquarter_id is not None:
@@ -57,7 +54,6 @@ class ReportsRepository:
         mr_ids: list[uuid.UUID],
         date_from: date,
         date_to: date,
-        company_id: uuid.UUID | None,
         active_only: bool,
         doctor_id: uuid.UUID | None,
         headquarter_id: uuid.UUID | None,
@@ -72,7 +68,6 @@ class ReportsRepository:
             mr_ids,
             date_from,
             date_to,
-            company_id=company_id,
             active_only=active_only,
             doctor_id=doctor_id,
             headquarter_id=headquarter_id,
@@ -98,7 +93,6 @@ class ReportsRepository:
         mr_ids: list[uuid.UUID],
         date_from: date,
         date_to: date,
-        company_id: uuid.UUID | None,
         active_only: bool,
         doctor_id: uuid.UUID | None,
         headquarter_id: uuid.UUID | None,
@@ -115,7 +109,6 @@ class ReportsRepository:
             mr_ids,
             date_from,
             date_to,
-            company_id=company_id,
             active_only=active_only,
             doctor_id=doctor_id,
             headquarter_id=headquarter_id,
@@ -162,7 +155,6 @@ class ReportsRepository:
         mr_ids: list[uuid.UUID],
         date_from: date,
         date_to: date,
-        company_id: uuid.UUID | None,
         active_only: bool,
         doctor_id: uuid.UUID | None,
         headquarter_id: uuid.UUID | None,
@@ -177,7 +169,6 @@ class ReportsRepository:
             mr_ids,
             date_from,
             date_to,
-            company_id=company_id,
             active_only=active_only,
             doctor_id=doctor_id,
             headquarter_id=headquarter_id,
@@ -208,7 +199,6 @@ class ReportsRepository:
         mr_ids: list[uuid.UUID],
         date_from: date,
         date_to: date,
-        company_id: uuid.UUID | None,
         active_only: bool,
         doctor_id: uuid.UUID | None,
         headquarter_id: uuid.UUID | None,
@@ -223,7 +213,6 @@ class ReportsRepository:
             mr_ids,
             date_from,
             date_to,
-            company_id=company_id,
             active_only=active_only,
             doctor_id=doctor_id,
             headquarter_id=headquarter_id,
@@ -254,7 +243,6 @@ class ReportsRepository:
         mr_ids: list[uuid.UUID],
         date_from: date,
         date_to: date,
-        company_id: uuid.UUID | None,
         active_only: bool,
         doctor_id: uuid.UUID | None,
         headquarter_id: uuid.UUID | None,
@@ -269,7 +257,6 @@ class ReportsRepository:
             mr_ids,
             date_from,
             date_to,
-            company_id=company_id,
             active_only=active_only,
             doctor_id=doctor_id,
             headquarter_id=headquarter_id,
@@ -302,7 +289,6 @@ class ReportsRepository:
         mr_ids: list[uuid.UUID],
         date_from: date,
         date_to: date,
-        company_id: uuid.UUID | None,
         active_only: bool,
         doctor_id: uuid.UUID | None,
         headquarter_id: uuid.UUID | None,
@@ -317,7 +303,6 @@ class ReportsRepository:
             mr_ids,
             date_from,
             date_to,
-            company_id=company_id,
             active_only=active_only,
             doctor_id=doctor_id,
             headquarter_id=headquarter_id,
@@ -350,7 +335,6 @@ class ReportsRepository:
         mr_ids: list[uuid.UUID],
         date_from: date,
         date_to: date,
-        company_id: uuid.UUID,
         active_only: bool,
         doctor_id: uuid.UUID | None,
         headquarter_id: uuid.UUID | None,
@@ -367,7 +351,6 @@ class ReportsRepository:
         active_clause = "AND s.is_active = true" if active_only else ""
         dim_extra: list[str] = []
         params: dict[str, Any] = {
-            "cid": str(company_id),
             "df": date_from,
             "dt": date_to,
             "mgr_role": manager_role,
@@ -397,8 +380,7 @@ class ReportsRepository:
             WITH RECURSIVE descend AS (
                 SELECT u.id AS root_id, u.id AS node_id, u.role::text AS role
                 FROM users u
-                WHERE u.company_id = CAST(:cid AS uuid)
-                  AND u.role = CAST(:mgr_role AS user_role)
+                WHERE u.role = CAST(:mgr_role AS user_role)
                   AND u.is_active = true
                 UNION ALL
                 SELECT d.root_id, u.id, u.role::text
@@ -423,8 +405,7 @@ class ReportsRepository:
                    COALESCE(a.qty, 0)::bigint
             FROM users u
             LEFT JOIN sales_agg a ON a.root_id = u.id
-            WHERE u.company_id = CAST(:cid AS uuid)
-              AND u.role = CAST(:mgr_role AS user_role)
+            WHERE u.role = CAST(:mgr_role AS user_role)
               AND u.is_active = true
             ORDER BY COALESCE(a.revenue, 0) DESC, u.full_name
             """
