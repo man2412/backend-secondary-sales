@@ -146,7 +146,6 @@ class SalesService:
         db: AsyncSession,
         user: User,
         sale_id: uuid.UUID,
-        *,
     ) -> dict | None:
         visible = await UserService().get_visible_mr_ids(db, user)
         row = await self._repo.get_sale(db, sale_id)

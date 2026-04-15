@@ -36,29 +36,11 @@ async def list_company_users(
     q: Annotated[str | None, Query(description="Search: name/email/phone/employee_code")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
-    try:
-        rows, total = await UserService().list_company_users(
-            db,
-            current,
-            q=q,
-            page=page,
-            per_page=per_page,
-            include_inactive=include_inactive,
-        )
-    except PermissionError as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
-    total_pages = (total + per_page - 1) // per_page if total else 0
-    return ok(
-        data=[UserOut.model_validate(u).model_dump(mode="json") for u in rows],
-        pagination=PaginationMeta(
-            page=page,
-            per_page=per_page,
-            total=total,
-            total_pages=total_pages,
-        ),
-    )
+    # Single-tenant: keep route for compatibility, but make it identical to `GET /v1/users`
+    # (direct reports list; no pagination envelope).
+    result = await db.execute(select(User).where(User.reports_to == current.id, User.is_active.is_(True)))
+    rows = result.scalars().all()
+    return ok(data=[UserOut.model_validate(u).model_dump(mode="json") for u in rows])
 
 
 @router.post("")
