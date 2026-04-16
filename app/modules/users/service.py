@@ -56,6 +56,7 @@ class UserService:
         user: User,
         *,
         q: str | None,
+        role: UserRole | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -66,6 +67,7 @@ class UserService:
         rows, total = await self._repo.list_users(
             db,
             q=q,
+            role=role,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,

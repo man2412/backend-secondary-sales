@@ -70,6 +70,7 @@ class UserRepository:
         db: AsyncSession,
         *,
         q: str | None,
+        role: UserRole | None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -90,6 +91,9 @@ class UserRepository:
                 | (User.phone.ilike(term))
                 | (User.employee_code.ilike(term))
             )
+        if role is not None:
+            base = base.where(User.role == role)
+            count_q = count_q.where(User.role == role)
         if active_only:
             base = base.where(User.is_active.is_(True))
             count_q = count_q.where(User.is_active.is_(True))

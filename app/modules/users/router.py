@@ -34,12 +34,14 @@ async def list_company_users(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     q: Annotated[str | None, Query(description="Search: name/email/phone/employee_code")] = None,
+    role: Annotated[UserRole | None, Query(description="Filter by user role")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     rows, total = await UserService().list_company_users(
         db,
         current,
         q=q,
+        role=role,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
