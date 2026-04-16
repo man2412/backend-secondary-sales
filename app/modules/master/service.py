@@ -151,11 +151,21 @@ class MasterService:
     async def create_headquarter(self, db: AsyncSession, user: User, body: HeadquarterCreate):
         self._ensure_super_admin(user)
         st = await self._repo.get_state(db, body.state_id)
-        div = await self._repo.get_division(db, body.division_id)
-        if st is None or div is None:
-            raise ValueError("State or division not found")
+        if st is None:
+            raise ValueError("State not found")
+        if not body.division_ids:
+            raise ValueError("At least one division_id is required")
+        # Optionally validate each division_id exists
+        for div_id in body.division_ids:
+            div = await self._repo.get_division(db, div_id)
+            if div is None:
+                raise ValueError("One or more divisions not found")
         return await self._repo.create_headquarter(
-            db, state_id=body.state_id, division_id=body.division_id, name=body.name, code=body.code
+            db,
+            state_id=body.state_id,
+            division_ids=body.division_ids,
+            name=body.name,
+            code=body.code,
         )
 
     async def update_headquarter(self, db: AsyncSession, user: User, hq_id: uuid.UUID, body: HeadquarterUpdate):

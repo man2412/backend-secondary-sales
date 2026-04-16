@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import Boolean, ForeignKey, Numeric, String, Uuid
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -33,9 +34,7 @@ class Headquarter(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     state_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("states.id"), nullable=False)
-    division_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("divisions.id"), nullable=False
-    )
+    division_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(Uuid(as_uuid=True)), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     code: Mapped[str | None] = mapped_column(String(50))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

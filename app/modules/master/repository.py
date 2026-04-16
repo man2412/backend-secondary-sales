@@ -135,9 +135,9 @@ class MasterRepository:
         return rows, int(total)
 
     async def create_headquarter(
-        self, db: AsyncSession, *, state_id: uuid.UUID, division_id: uuid.UUID, name: str, code: str | None
+        self, db: AsyncSession, *, state_id: uuid.UUID, division_ids: list[uuid.UUID], name: str, code: str | None
     ) -> Headquarter:
-        row = Headquarter(state_id=state_id, division_id=division_id, name=name, code=code, is_active=True)
+        row = Headquarter(state_id=state_id, division_ids=division_ids, name=name, code=code, is_active=True)
         db.add(row)
         await db.flush()
         await db.refresh(row)

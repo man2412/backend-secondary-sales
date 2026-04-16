@@ -58,7 +58,7 @@ class DivisionOut(BaseModel):
 
 class HeadquarterCreate(BaseModel):
     state_id: uuid.UUID
-    division_id: uuid.UUID
+    division_ids: list[uuid.UUID]
     name: str = Field(..., min_length=1, max_length=255)
     code: str = Field(..., min_length=1, max_length=50)
 
@@ -74,7 +74,7 @@ class HeadquarterOut(BaseModel):
 
     id: uuid.UUID
     state_id: uuid.UUID
-    division_id: uuid.UUID
+    division_ids: list[uuid.UUID]
     name: str
     code: str | None
     is_active: bool
