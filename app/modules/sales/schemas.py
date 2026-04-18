@@ -1,8 +1,13 @@
 import uuid
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
+
+# ---------------------------------------------------------------------------
+# Secondary Sale
+# ---------------------------------------------------------------------------
 
 class SecondarySaleOut(BaseModel):
     model_config = {"from_attributes": True}
@@ -20,10 +25,14 @@ class SecondarySaleOut(BaseModel):
     sale_qty: int
     free_qty: int
     ptr: float
-    pts: float
+    pts: float | None
     mrp: float
     special_price: float | None
     total_amount: float | None
+    reported_amount: float | None
+    bill_ref: str | None
+    batch: str | None
+    pack: str | None
     remarks: str | None
     is_active: bool
     created_at: datetime
@@ -58,3 +67,49 @@ class SecondarySaleUpdate(BaseModel):
         description="0 is stored as null (revert to PTR for generated total_amount).",
     )
     remarks: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Import Job
+# ---------------------------------------------------------------------------
+
+class ImportJobOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    filename: str
+    source_type: str
+    status: str
+    mr_id: uuid.UUID | None
+    detected_fos_name: str | None
+    total_rows: int | None
+    committed_count: int | None
+    model_used: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ImportJobPreviewOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    filename: str
+    source_type: str
+    status: str
+    mr_id: uuid.UUID | None
+    detected_fos_name: str | None
+    total_rows: int | None
+    model_used: str | None
+    structured_rows: list[Any] | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ImportJobCommitBody(BaseModel):
+    """Frontend sends back the (possibly edited) rows for final commit."""
+    confirmed_rows: list[dict[str, Any]] = Field(
+        ...,
+        description="The structured_rows array from preview, after user edits. Rows with skip=true are excluded.",
+    )

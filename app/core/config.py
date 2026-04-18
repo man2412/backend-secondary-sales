@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/v1"
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
+    GEMINI_API_KEY: str = ""
+    OPENAI_API_KEY: str = ""
 
     @property
     def allowed_origins_list(self) -> list[str]:

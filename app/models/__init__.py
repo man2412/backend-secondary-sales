@@ -8,6 +8,7 @@ from app.models.base import Base
 from app.models.doctor import Doctor, DoctorMedicalStore
 from app.models.enums import UserRole
 from app.models.master import Division, Headquarter, Location, Product, State
+from app.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
 from app.models.sale import SecondarySale
 from app.models.stockist import (
     MedicalStore,
@@ -41,4 +42,7 @@ __all__ = [
     "MrStoreAllocation",
     "MrProductAllocation",
     "SecondarySale",
+    "ImportJob",
+    "ImportJobStatus",
+    "ImportSourceType",
 ]

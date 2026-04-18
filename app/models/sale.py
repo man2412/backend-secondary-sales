@@ -1,7 +1,7 @@
 import uuid
 from datetime import date
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, Numeric, Text, Uuid
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, Numeric, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.schema import Computed
 
@@ -28,12 +28,16 @@ class SecondarySale(Base, TimestampMixin):
     sale_qty: Mapped[int] = mapped_column(Integer, nullable=False)
     free_qty: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     ptr: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
-    pts: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    pts: Mapped[float | None] = mapped_column(Numeric(10, 2))
     mrp: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     special_price: Mapped[float | None] = mapped_column(Numeric(10, 2))
     total_amount: Mapped[float | None] = mapped_column(
         Numeric(12, 2),
         Computed("(sale_qty::numeric * COALESCE(special_price, ptr))", persisted=True),
     )
+    reported_amount: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    bill_ref: Mapped[str | None] = mapped_column(String(100))
+    batch: Mapped[str | None] = mapped_column(String(100))
+    pack: Mapped[str | None] = mapped_column(String(100))
     remarks: Mapped[str | None] = mapped_column(Text())
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
