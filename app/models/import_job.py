@@ -11,6 +11,7 @@ from app.models.base import Base, TimestampMixin
 class ImportJobStatus(str, enum.Enum):
     processing = "processing"
     ready = "ready"
+    partial = "partial"
     committed = "committed"
     failed = "failed"
 
@@ -46,3 +47,6 @@ class ImportJob(Base, TimestampMixin):
     total_rows: Mapped[int | None] = mapped_column(Integer)
     committed_count: Mapped[int | None] = mapped_column(Integer)
     error_message: Mapped[str | None] = mapped_column(Text)
+    chunks_total: Mapped[int | None] = mapped_column(Integer)
+    chunks_succeeded: Mapped[int | None] = mapped_column(Integer)
+    extraction_warnings: Mapped[list | None] = mapped_column(JSONB)

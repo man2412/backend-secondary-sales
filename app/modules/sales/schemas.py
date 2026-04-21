@@ -74,7 +74,7 @@ class SecondarySaleUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ImportJobOut(BaseModel):
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
     id: uuid.UUID
     filename: str
@@ -85,13 +85,16 @@ class ImportJobOut(BaseModel):
     total_rows: int | None
     committed_count: int | None
     model_used: str | None
+    chunks_total: int | None = None
+    chunks_succeeded: int | None = None
+    extraction_warnings: list[str] | None = None
     error_message: str | None
     created_at: datetime
     updated_at: datetime
 
 
 class ImportJobPreviewOut(BaseModel):
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
     id: uuid.UUID
     filename: str
@@ -101,6 +104,9 @@ class ImportJobPreviewOut(BaseModel):
     detected_fos_name: str | None
     total_rows: int | None
     model_used: str | None
+    chunks_total: int | None = None
+    chunks_succeeded: int | None = None
+    extraction_warnings: list[str] | None = None
     structured_rows: list[Any] | None
     error_message: str | None
     created_at: datetime

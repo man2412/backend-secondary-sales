@@ -118,24 +118,66 @@ def _build_prompt(req: LLMParseRequest) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Gemini (primary)
+# Gemini (primary) — with retry on transient failures
 # ---------------------------------------------------------------------------
 
+_GEMINI_MODEL = "gemini-1.5-flash"
+_GEMINI_TIMEOUT_S = 180
+_GEMINI_MAX_ATTEMPTS = 3
+_GEMINI_BACKOFF_SECONDS = (1, 4, 16)
+
+
+def _is_transient_gemini_error(exc: BaseException) -> bool:
+    """Retry on quota / timeout / availability; don't retry on schema / auth errors."""
+    name = type(exc).__name__
+    return name in {
+        "ResourceExhausted",      # 429
+        "DeadlineExceeded",       # 504
+        "ServiceUnavailable",     # 503
+        "InternalServerError",    # 500
+        "Aborted",                # transient
+        "Unknown",                # network blip
+        "JSONDecodeError",        # truncated / malformed JSON — worth retrying
+    }
+
+
 def _call_gemini(system: str, user: str) -> tuple[dict, str]:
+    import time
     import google.generativeai as genai  # type: ignore
 
     genai.configure(api_key=settings.GEMINI_API_KEY)
     model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
+        model_name=_GEMINI_MODEL,
         system_instruction=system,
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
             temperature=0.0,
+            max_output_tokens=8192,
         ),
     )
-    response = model.generate_content(user)
-    raw = json.loads(response.text)
-    return raw, "gemini-2.0-flash"
+
+    last_exc: Exception | None = None
+    for attempt in range(_GEMINI_MAX_ATTEMPTS):
+        try:
+            response = model.generate_content(
+                user,
+                request_options={"timeout": _GEMINI_TIMEOUT_S},
+            )
+            return json.loads(response.text), _GEMINI_MODEL
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt + 1 < _GEMINI_MAX_ATTEMPTS and _is_transient_gemini_error(exc):
+                delay = _GEMINI_BACKOFF_SECONDS[attempt]
+                logger.warning(
+                    "Gemini attempt %d/%d failed (%s), retrying in %ds",
+                    attempt + 1, _GEMINI_MAX_ATTEMPTS, type(exc).__name__, delay,
+                )
+                time.sleep(delay)
+                continue
+            break
+
+    assert last_exc is not None
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +212,12 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
     raw: dict = {}
     model_used = ""
 
+    _gemini_error: Exception | None = None
     if settings.GEMINI_API_KEY:
         try:
             raw, model_used = _call_gemini(system, user)
         except Exception as exc:
+            _gemini_error = exc
             logger.warning("Gemini failed (%s), trying OpenAI fallback", exc)
 
     if not model_used and settings.OPENAI_API_KEY:
@@ -184,7 +228,13 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
             raise RuntimeError("Both LLM providers failed. Check API keys and connectivity.") from exc
 
     if not model_used:
-        raise RuntimeError("No LLM API keys configured. Set GEMINI_API_KEY or OPENAI_API_KEY in .env")
+        if not settings.GEMINI_API_KEY and not settings.OPENAI_API_KEY:
+            raise RuntimeError("No LLM API keys configured. Set GEMINI_API_KEY or OPENAI_API_KEY in .env")
+        if _gemini_error is not None:
+            raise RuntimeError(
+                f"Gemini call failed: {type(_gemini_error).__name__}: {_gemini_error}"
+            ) from _gemini_error
+        raise RuntimeError("LLM call returned no model_used (unknown reason)")
 
     rows: list[dict] = raw.get("rows", [])
     if not isinstance(rows, list):

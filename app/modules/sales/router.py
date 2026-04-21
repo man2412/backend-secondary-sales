@@ -128,6 +128,11 @@ async def delete_secondary_sale(
 # AI Import Jobs
 # ---------------------------------------------------------------------------
 
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_PDF_PAGES = 150
+MAX_TABULAR_ROWS = 10_000
+
+
 @router.post("/import-jobs", dependencies=[Depends(require_roles(UserRole.SUPER_ADMIN))])
 async def upload_import_job(
     background_tasks: BackgroundTasks,
@@ -139,9 +144,29 @@ async def upload_import_job(
     """
     Upload a distributor sales file. Processing (LLM parse + validation) runs in the background.
     Poll GET /import-jobs/{id}/preview until status = ready.
+    Limits: 10 MB / 150 PDF pages / 10,000 Excel-CSV rows.
     """
     content = await file.read()
     filename = file.filename or "upload"
+
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB limit",
+        )
+
+    from app.modules.sales.importer.extractor import probe_size
+    pages, rows = probe_size(filename, content)
+    if pages is not None and pages > MAX_PDF_PAGES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"PDF has {pages} pages; max allowed is {MAX_PDF_PAGES}",
+        )
+    if rows is not None and rows > MAX_TABULAR_ROWS:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Spreadsheet has {rows} rows; max allowed is {MAX_TABULAR_ROWS}",
+        )
 
     try:
         job = await ImportService().create_job(
@@ -198,7 +223,8 @@ async def preview_import_job(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Import job not found")
     if job.uploaded_by != current.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your import job")
-    return ok(data=ImportJobPreviewOut.model_validate(job).model_dump(mode="json"))
+    payload = ImportJobPreviewOut.model_validate(job).model_dump(mode="json")
+    return ok(data=payload)
 
 
 @router.post(
@@ -228,12 +254,25 @@ async def commit_import_job(
         )
 
     try:
-        committed = await ImportService().commit_job(db, job, body.confirmed_rows, current)
+        summary = await ImportService().commit_job(db, job, body.confirmed_rows, current)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
     await db.commit()
+
+    committed = summary["committed"]
+    skipped = summary["skipped"]
+    if committed == 0:
+        message = (
+            f"No sales were committed. {skipped} row(s) skipped — "
+            f"see skipped_rows for per-row reasons."
+        )
+    elif skipped > 0:
+        message = f"{committed} sale(s) committed, {skipped} skipped — see skipped_rows."
+    else:
+        message = f"{committed} sale(s) committed successfully."
+
     return ok(
-        data={"committed": committed, "job_id": str(job_id), "status": job.status},
-        message=f"{committed} sale(s) committed successfully.",
+        data={"job_id": str(job_id), **summary},
+        message=message,
     )
