@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, ForeignKey, String, Text, Uuid
+from sqlalchemy import ARRAY, Boolean, ForeignKey, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -16,7 +16,6 @@ class SuperStockist(Base, TimestampMixin):
     drug_licence: Mapped[str | None] = mapped_column(String(100))
     pan: Mapped[str | None] = mapped_column(String(20))
     address: Mapped[str | None] = mapped_column(Text())
-    location_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("locations.id"))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -46,7 +45,6 @@ class Stockist(Base, TimestampMixin):
     drug_licence: Mapped[str | None] = mapped_column(String(100))
     pan: Mapped[str | None] = mapped_column(String(20))
     address: Mapped[str | None] = mapped_column(Text())
-    location_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("locations.id"))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -75,6 +73,7 @@ class MedicalStore(Base, TimestampMixin):
     pan: Mapped[str | None] = mapped_column(String(20))
     address: Mapped[str | None] = mapped_column(Text())
     location_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("locations.id"))
+    alternate_names: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 

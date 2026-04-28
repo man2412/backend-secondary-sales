@@ -44,9 +44,7 @@ class UserService:
             return [row[0] for row in r.fetchall()]
         if user.role in (UserRole.SALES_DIRECTOR,):
             return list(await self._repo.list_mr_ids_for_company(db))
-        if user.role in (UserRole.STATE_HEAD, UserRole.RSM, UserRole.DEPUTY_RSM) and user.state_id:
-            return list(await self._repo.list_mr_ids_for_state_scope(db, user.state_id))
-        if user.role == UserRole.ASM:
+        if user.role in (UserRole.STATE_HEAD, UserRole.RSM, UserRole.DEPUTY_RSM, UserRole.ASM):
             return list(await self._repo.list_mr_ids_under_manager(db, user.id))
         return []
 
@@ -61,14 +59,18 @@ class UserService:
         per_page: int,
         include_inactive: bool,
     ) -> tuple[list[User], int]:
-        if user.role != UserRole.SUPER_ADMIN:
-            raise PermissionError("Only SUPER_ADMIN can list company users")
+        if user.role == UserRole.MR:
+            raise PermissionError("MRs cannot list company users")
         offset = (page - 1) * per_page
+        allowed_ids = None
+        if user.role != UserRole.SUPER_ADMIN:
+            allowed_ids = await self._repo.list_user_ids_in_subtree(db, user.id)
         rows, total = await self._repo.list_users(
             db,
             q=q,
             role=role,
             active_only=not include_inactive,
+            allowed_ids=allowed_ids,
             limit=per_page,
             offset=offset,
         )

@@ -119,6 +119,7 @@ class ProductCreate(BaseModel):
     mrp: float = Field(..., ge=0)
     ptr: float = Field(..., ge=0)
     pts: float = Field(..., ge=0)
+    net_rate: float | None = Field(None, ge=0)
     hsn_code: str | None = Field(None, max_length=50)
 
 
@@ -128,6 +129,7 @@ class ProductUpdate(BaseModel):
     mrp: float | None = Field(None, ge=0)
     ptr: float | None = Field(None, ge=0)
     pts: float | None = Field(None, ge=0)
+    net_rate: float | None = Field(None, ge=0)
     hsn_code: str | None = Field(None, max_length=50)
     is_active: bool | None = None
 
@@ -142,6 +144,7 @@ class ProductOut(BaseModel):
     mrp: float
     ptr: float
     pts: float
+    net_rate: float | None
     hsn_code: str | None
     is_active: bool
     created_at: datetime

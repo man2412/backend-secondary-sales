@@ -37,15 +37,20 @@ async def list_company_users(
     role: Annotated[UserRole | None, Query(description="Filter by user role")] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
-    rows, total = await UserService().list_company_users(
-        db,
-        current,
-        q=q,
-        role=role,
-        page=page,
-        per_page=per_page,
-        include_inactive=include_inactive,
-    )
+    try:
+        rows, total = await UserService().list_company_users(
+            db,
+            current,
+            q=q,
+            role=role,
+            page=page,
+            per_page=per_page,
+            include_inactive=include_inactive,
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     total_pages = (total + per_page - 1) // per_page if per_page else 1
     return ok(
         data=[UserOut.model_validate(u).model_dump(mode="json") for u in rows],

@@ -29,7 +29,6 @@ class StockistsService:
         user: User,
         *,
         q: str | None,
-        location_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -38,7 +37,6 @@ class StockistsService:
         rows, total = await self._repo.list_super_stockists(
             db,
             q=q,
-            location_id=location_id,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,
@@ -61,7 +59,6 @@ class StockistsService:
             drug_licence=body.drug_licence,
             pan=body.pan,
             address=body.address,
-            location_id=body.location_id,
         )
 
     async def update_super_stockist(
@@ -83,7 +80,6 @@ class StockistsService:
             drug_licence=data.get("drug_licence"),
             pan=data.get("pan"),
             address=data.get("address"),
-            location_id=data.get("location_id"),
             is_active=data.get("is_active"),
         )
 
@@ -94,7 +90,6 @@ class StockistsService:
         *,
         q: str | None,
         super_stockist_id: uuid.UUID | None,
-        location_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -104,7 +99,6 @@ class StockistsService:
             db,
             q=q,
             super_stockist_id=super_stockist_id,
-            location_id=location_id,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,
@@ -132,7 +126,6 @@ class StockistsService:
             drug_licence=body.drug_licence,
             pan=body.pan,
             address=body.address,
-            location_id=body.location_id,
         )
 
     async def update_stockist(self, db: AsyncSession, user: User, entity_id: uuid.UUID, body: StockistUpdate):
@@ -157,7 +150,6 @@ class StockistsService:
             drug_licence=data.get("drug_licence"),
             pan=data.get("pan"),
             address=data.get("address"),
-            location_id=data.get("location_id"),
             is_active=data.get("is_active"),
         )
 
@@ -201,7 +193,6 @@ class StockistsService:
             drug_licence=None,
             pan=None,
             address=None,
-            location_id=None,
             is_active=False,
         )
 
@@ -220,7 +211,6 @@ class StockistsService:
             drug_licence=None,
             pan=None,
             address=None,
-            location_id=None,
             is_active=False,
         )
 
@@ -239,6 +229,7 @@ class StockistsService:
             pan=None,
             address=None,
             location_id=None,
+            alternate_names=[],
             is_active=False,
         )
 
@@ -249,6 +240,9 @@ class StockistsService:
         if user.role == UserRole.MR:
             rows, _ = await self._repo.list_medical_stores(
                 db,
+                q=None,
+                stockist_id=None,
+                location_id=None,
                 active_only=True,
                 mr_id=user.id,
                 limit=5000,
@@ -273,6 +267,7 @@ class StockistsService:
             pan=body.pan,
             address=body.address,
             location_id=body.location_id,
+            alternate_names=body.alternate_names,
         )
 
     async def update_medical_store(
@@ -299,5 +294,6 @@ class StockistsService:
             pan=data.get("pan"),
             address=data.get("address"),
             location_id=data.get("location_id"),
+            alternate_names=data.get("alternate_names"),
             is_active=data.get("is_active"),
         )

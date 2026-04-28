@@ -14,6 +14,9 @@ class SecondarySaleOut(BaseModel):
 
     id: uuid.UUID
     mr_id: uuid.UUID
+    asm_id: uuid.UUID | None = None
+    rsm_id: uuid.UUID | None = None
+    state_head_id: uuid.UUID | None = None
     product_id: uuid.UUID
     doctor_id: uuid.UUID | None
     medical_store_id: uuid.UUID | None

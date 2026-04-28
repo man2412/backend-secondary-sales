@@ -51,7 +51,6 @@ async def list_super_stockists(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     q: Annotated[str | None, Query(description="Search: name/gst/pan/unique_code")] = None,
-    location_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = StockistsService()
@@ -59,7 +58,6 @@ async def list_super_stockists(
         db,
         current,
         q=q,
-        location_id=location_id,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,
@@ -121,7 +119,6 @@ async def list_stockists(
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     q: Annotated[str | None, Query(description="Search: name/gst/pan/unique_code")] = None,
     super_stockist_id: Annotated[UUID | None, Query()] = None,
-    location_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = StockistsService()
@@ -130,7 +127,6 @@ async def list_stockists(
         current,
         q=q,
         super_stockist_id=super_stockist_id,
-        location_id=location_id,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,

@@ -2,9 +2,10 @@ import uuid
 from collections.abc import Sequence
 from datetime import date
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.enums import UserRole
 from app.models.master import Headquarter, Location, State
 from app.models.sale import SecondarySale
 
@@ -39,14 +40,36 @@ class SalesRepository:
         self,
         db: AsyncSession,
         *,
-        mr_ids: list[uuid.UUID],
+        caller_id: uuid.UUID,
+        caller_role: UserRole,
+        fallback_mr_ids: list[uuid.UUID],
+        mr_id_filter: uuid.UUID | None,
         sale_date: date | None,
         active_only: bool,
         limit: int,
         offset: int,
     ) -> tuple[Sequence[SecondarySale], int]:
-        base = select(SecondarySale).where(SecondarySale.mr_id.in_(mr_ids))
-        count_q = select(func.count()).select_from(SecondarySale).where(SecondarySale.mr_id.in_(mr_ids))
+        """
+        Role-aware sale listing with manager-snapshot RBAC.
+
+        - SUPER_ADMIN, SALES_DIRECTOR: see all sales.
+        - MR: only their own sales.
+        - ASM/RSM/DEPUTY_RSM/STATE_HEAD: sales whose snapshot column matches
+          their id. For older rows where the snapshot is NULL we fall back to
+          the live subtree (`fallback_mr_ids`) so legacy data stays visible.
+        """
+        base = select(SecondarySale)
+        count_q = select(func.count()).select_from(SecondarySale)
+
+        rbac_clause = self._build_rbac_clause(caller_id, caller_role, fallback_mr_ids)
+        if rbac_clause is not None:
+            base = base.where(rbac_clause)
+            count_q = count_q.where(rbac_clause)
+
+        if mr_id_filter is not None:
+            base = base.where(SecondarySale.mr_id == mr_id_filter)
+            count_q = count_q.where(SecondarySale.mr_id == mr_id_filter)
+
         if sale_date is not None:
             base = base.where(SecondarySale.sale_date == sale_date)
             count_q = count_q.where(SecondarySale.sale_date == sale_date)
@@ -58,6 +81,37 @@ class SalesRepository:
         base = base.offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()
         return rows, int(total)
+
+    @staticmethod
+    def _build_rbac_clause(
+        caller_id: uuid.UUID,
+        caller_role: UserRole,
+        fallback_mr_ids: list[uuid.UUID],
+    ):
+        """Build the WHERE clause that scopes sales to what the caller can see."""
+        if caller_role in (UserRole.SUPER_ADMIN, UserRole.SALES_DIRECTOR):
+            return None
+        if caller_role == UserRole.MR:
+            return SecondarySale.mr_id == caller_id
+
+        # Manager roles: prefer snapshot column; fall back to live subtree for
+        # rows persisted before the snapshot columns existed (snapshot IS NULL).
+        if caller_role == UserRole.ASM:
+            snapshot_col = SecondarySale.asm_id
+        elif caller_role in (UserRole.RSM, UserRole.DEPUTY_RSM):
+            snapshot_col = SecondarySale.rsm_id
+        elif caller_role == UserRole.STATE_HEAD:
+            snapshot_col = SecondarySale.state_head_id
+        else:
+            # Unknown role — deny by default with an impossible filter.
+            return SecondarySale.mr_id.in_([])
+
+        clauses = [snapshot_col == caller_id]
+        if fallback_mr_ids:
+            clauses.append(
+                and_(snapshot_col.is_(None), SecondarySale.mr_id.in_(fallback_mr_ids))
+            )
+        return or_(*clauses)
 
     async def count_mr_sales_on_date(
         self, db: AsyncSession, *, mr_id: uuid.UUID, sale_date: date
@@ -89,9 +143,15 @@ class SalesRepository:
         mrp: float,
         special_price: float | None,
         remarks: str | None,
+        asm_id: uuid.UUID | None = None,
+        rsm_id: uuid.UUID | None = None,
+        state_head_id: uuid.UUID | None = None,
     ) -> SecondarySale:
         row = SecondarySale(
             mr_id=mr_id,
+            asm_id=asm_id,
+            rsm_id=rsm_id,
+            state_head_id=state_head_id,
             product_id=product_id,
             doctor_id=doctor_id,
             medical_store_id=medical_store_id,

@@ -21,10 +21,12 @@ import asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.allocation import MrLocationAllocation, MrProductAllocation  # noqa: F401
+from app.models.allocation import MrDoctorAllocation, MrLocationAllocation
+from app.models.doctor import Doctor, DoctorMedicalStore
 from app.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
-from app.models.master import Location, Product
+from app.models.master import Headquarter, Location, Product
 from app.models.sale import SecondarySale
+from app.models.stockist import MedicalStore
 from app.models.user import User
 from app.modules.sales.importer.extractor import ExtractionResult, extract
 from app.modules.sales.importer.llm_parser import LLMParseRequest, LLMParseResponse, parse_with_llm
@@ -145,6 +147,12 @@ class ImportService:
 
         # 5. Deterministic validation + type coercion
         validated = await validate_rows(db, resolved_rows, job_mr_id=job.mr_id)
+
+        # 5b. Display names follow DB for resolved ids; null ids → null names (user fills in UI)
+        await self._hydrate_raw_names_from_db(db, validated)
+
+        # 5c. Auto-populate derived fields (division/location/hq/state + doctor auto-fill)
+        await self._enrich_derived_fields(db, validated)
 
         # 6. Up-front allocation warning so user sees it at preview, not after commit
         mr_ids_in_rows: set[uuid.UUID] = set()
@@ -290,7 +298,31 @@ class ImportService:
         Insert confirmed rows into secondary_sales.
         Returns a structured summary with counts and per-row skip reasons.
         """
+        from app.modules.sales.service import resolve_manager_chain
+
         validated = await validate_rows(db, confirmed_rows, job_mr_id=job.mr_id)
+        await self._hydrate_raw_names_from_db(db, validated)
+        await self._enrich_derived_fields(db, validated)
+
+        # Pre-compute manager-chain snapshot per unique mr_id to avoid repeating
+        # the same recursive CTE for every row of the same MR.
+        chain_cache: dict[uuid.UUID, dict[str, uuid.UUID | None]] = {}
+
+        # Block whole commit if any non-skipped row still lacks product, store, or MR id
+        bad_indexes = [
+            idx
+            for idx, row in enumerate(validated)
+            if not row.get("skip")
+            and (not row.get("product_id") or not row.get("medical_store_id") or not row.get("mr_id"))
+        ]
+        if bad_indexes:
+            raise ValueError(
+                "Cannot commit: some rows are missing required product_id, medical_store_id, or mr_id. "
+                "Assign them in preview (skipped rows are ignored). "
+                f"Affected row_index values (0-based): {bad_indexes[:40]}"
+                + ("..." if len(bad_indexes) > 40 else "")
+            )
+
         committed = 0
         skipped_rows: list[dict] = []
 
@@ -325,12 +357,16 @@ class ImportService:
                 _skip("missing mr_id or product_id")
                 continue
 
-            location_id, state_id, hq_id, division_id = await self._resolve_mr_location(
-                db, mr_id, product_id
-            )
-            if location_id is None:
-                reason = await self._explain_allocation_failure(db, mr_id, product_id)
-                _skip(reason)
+            location_id = uuid.UUID(row["location_id"]) if row.get("location_id") else None
+            hq_id = uuid.UUID(row["headquarter_id"]) if row.get("headquarter_id") else None
+            state_id = uuid.UUID(row["state_id"]) if row.get("state_id") else None
+            division_id = uuid.UUID(row["division_id"]) if row.get("division_id") else None
+
+            if not all([location_id, hq_id, state_id, division_id]):
+                _skip(
+                    "could not derive location chain — ensure the medical store (or doctor) "
+                    "has a location_id, the location maps to a headquarter, and the product has a division"
+                )
                 continue
 
             product = await db.get(Product, product_id)
@@ -346,8 +382,16 @@ class ImportService:
             if isinstance(sale_date, str):
                 sale_date = date.fromisoformat(sale_date)
 
+            chain = chain_cache.get(mr_id)
+            if chain is None:
+                chain = await resolve_manager_chain(db, mr_id)
+                chain_cache[mr_id] = chain
+
             sale = SecondarySale(
                 mr_id=mr_id,
+                asm_id=chain["asm_id"],
+                rsm_id=chain["rsm_id"],
+                state_head_id=chain["state_head_id"],
                 product_id=product_id,
                 doctor_id=uuid.UUID(row["doctor_id"]) if row.get("doctor_id") else None,
                 medical_store_id=uuid.UUID(row["medical_store_id"]) if row.get("medical_store_id") else None,
@@ -400,10 +444,18 @@ class ImportService:
         from app.models.stockist import MedicalStore
         rows = (
             await db.execute(
-                select(MedicalStore.id, MedicalStore.name).where(MedicalStore.is_active.is_(True))
+                select(MedicalStore.id, MedicalStore.name, MedicalStore.alternate_names).where(
+                    MedicalStore.is_active.is_(True)
+                )
             )
         ).all()
-        return [EntityCandidate(id=str(r[0]), name=r[1]) for r in rows]
+        candidates: list[EntityCandidate] = []
+        for r in rows:
+            candidates.append(EntityCandidate(id=str(r[0]), name=r[1]))
+            for alt in r[2] or []:
+                if alt and str(alt).strip():
+                    candidates.append(EntityCandidate(id=str(r[0]), name=str(alt).strip()))
+        return candidates
 
     async def _get_all_mrs(
         self,
@@ -427,6 +479,246 @@ class ImportService:
             )
         ).all()
         return [EntityCandidate(id=str(r[0]), name=r[1]) for r in rows]
+
+    async def _hydrate_raw_names_from_db(self, db: AsyncSession, rows: list[dict]) -> None:
+        """
+        Preview / commit: show canonical names from DB for any resolved ids.
+        If product_id or medical_store_id is missing, clear the corresponding raw name
+        so the UI prompts the user to assign an id (sheet text is not kept on null ids).
+        """
+        from app.models.stockist import MedicalStore
+
+        def _pid(val: object) -> uuid.UUID | None:
+            if val is None or val == "":
+                return None
+            try:
+                return uuid.UUID(str(val))
+            except (ValueError, AttributeError):
+                return None
+
+        product_ids: set[uuid.UUID] = set()
+        store_ids: set[uuid.UUID] = set()
+        for row in rows:
+            if p := _pid(row.get("product_id")):
+                product_ids.add(p)
+            if s := _pid(row.get("medical_store_id")):
+                store_ids.add(s)
+
+        prod_map: dict[uuid.UUID, str] = {}
+        if product_ids:
+            rs = (
+                await db.execute(select(Product.id, Product.name).where(Product.id.in_(product_ids)))
+            ).all()
+            prod_map = {r[0]: (r[1] or "").strip() for r in rs}
+
+        store_map: dict[uuid.UUID, str] = {}
+        if store_ids:
+            rs = (
+                await db.execute(
+                    select(MedicalStore.id, MedicalStore.name).where(MedicalStore.id.in_(store_ids))
+                )
+            ).all()
+            store_map = {r[0]: (r[1] or "").strip() for r in rs}
+
+        for row in rows:
+            p = _pid(row.get("product_id"))
+            if p and p in prod_map and prod_map[p]:
+                row["product_name_raw"] = prod_map[p]
+            else:
+                row["product_name_raw"] = None
+
+            s = _pid(row.get("medical_store_id"))
+            if s and s in store_map and store_map[s]:
+                row["customer_name_raw"] = store_map[s]
+            else:
+                row["customer_name_raw"] = None
+
+    # ------------------------------------------------------------------
+    # Auto-populate derived fields (division/location/HQ/state + doctor)
+    # ------------------------------------------------------------------
+
+    async def _enrich_derived_fields(self, db: AsyncSession, rows: list[dict]) -> None:
+        """
+        Auto-populate derived fields on each row using batch DB lookups:
+
+          division_id    <- product.division_id
+          location_id    <- medical_store.location_id (fallback: doctor.location_id)
+          headquarter_id <- location.headquarter_id
+          state_id       <- headquarter.state_id
+
+        Also auto-fills `doctor_id` when null and (mr_id, medical_store_id) are
+        known: the unique doctor that is both linked to the store
+        (`doctor_medical_stores`) AND allocated to the MR (`mr_doctor_allocations`).
+        """
+
+        def _pid(val: object) -> uuid.UUID | None:
+            if val is None or val == "":
+                return None
+            try:
+                return uuid.UUID(str(val))
+            except (ValueError, AttributeError):
+                return None
+
+        # ---------- Pass 1: collect ids ----------
+        product_ids: set[uuid.UUID] = set()
+        store_ids: set[uuid.UUID] = set()
+        doctor_ids: set[uuid.UUID] = set()
+
+        for row in rows:
+            if p := _pid(row.get("product_id")):
+                product_ids.add(p)
+            if s := _pid(row.get("medical_store_id")):
+                store_ids.add(s)
+            if d := _pid(row.get("doctor_id")):
+                doctor_ids.add(d)
+
+        # ---------- Step A: doctor auto-fill (mr_id + store_id -> doctor_id) ----------
+        # Build the (mr_id, store_id) pairs that need a doctor assignment.
+        autofill_pairs: list[tuple[uuid.UUID, uuid.UUID]] = []
+        autofill_pair_set: set[tuple[uuid.UUID, uuid.UUID]] = set()
+        for row in rows:
+            if _pid(row.get("doctor_id")) is not None:
+                continue
+            mr = _pid(row.get("mr_id"))
+            st = _pid(row.get("medical_store_id"))
+            if mr is None or st is None:
+                continue
+            pair = (mr, st)
+            if pair not in autofill_pair_set:
+                autofill_pair_set.add(pair)
+                autofill_pairs.append(pair)
+
+        pair_to_doctor: dict[tuple[uuid.UUID, uuid.UUID], uuid.UUID] = {}
+        if autofill_pairs:
+            store_set = {p[1] for p in autofill_pairs}
+            mr_set = {p[0] for p in autofill_pairs}
+
+            store_doc_rows = (
+                await db.execute(
+                    select(
+                        DoctorMedicalStore.medical_store_id,
+                        DoctorMedicalStore.doctor_id,
+                    ).where(DoctorMedicalStore.medical_store_id.in_(store_set))
+                )
+            ).all()
+            store_doctor_map: dict[uuid.UUID, set[uuid.UUID]] = {}
+            for sid, did in store_doc_rows:
+                store_doctor_map.setdefault(sid, set()).add(did)
+
+            mr_alloc_rows = (
+                await db.execute(
+                    select(MrDoctorAllocation.mr_id, MrDoctorAllocation.doctor_id).where(
+                        MrDoctorAllocation.mr_id.in_(mr_set),
+                        MrDoctorAllocation.is_active.is_(True),
+                    )
+                )
+            ).all()
+            mr_doctor_map: dict[uuid.UUID, set[uuid.UUID]] = {}
+            for mid, did in mr_alloc_rows:
+                mr_doctor_map.setdefault(mid, set()).add(did)
+
+            for mr, st in autofill_pairs:
+                store_docs = store_doctor_map.get(st, set())
+                mr_docs = mr_doctor_map.get(mr, set())
+                common = store_docs & mr_docs
+                if len(common) == 1:
+                    pair_to_doctor[(mr, st)] = next(iter(common))
+
+        # Apply auto-filled doctor_ids and add them to the doctor_id batch lookup.
+        for row in rows:
+            if _pid(row.get("doctor_id")) is not None:
+                continue
+            mr = _pid(row.get("mr_id"))
+            st = _pid(row.get("medical_store_id"))
+            if mr is None or st is None:
+                continue
+            did = pair_to_doctor.get((mr, st))
+            if did is not None:
+                row["doctor_id"] = str(did)
+                doctor_ids.add(did)
+
+        # ---------- Step B: batch fetch products / stores / doctors ----------
+        product_map: dict[uuid.UUID, uuid.UUID] = {}  # product_id -> division_id
+        if product_ids:
+            rs = (
+                await db.execute(
+                    select(Product.id, Product.division_id).where(Product.id.in_(product_ids))
+                )
+            ).all()
+            product_map = {r[0]: r[1] for r in rs}
+
+        store_map: dict[uuid.UUID, uuid.UUID | None] = {}  # store_id -> location_id
+        if store_ids:
+            rs = (
+                await db.execute(
+                    select(MedicalStore.id, MedicalStore.location_id).where(
+                        MedicalStore.id.in_(store_ids)
+                    )
+                )
+            ).all()
+            store_map = {r[0]: r[1] for r in rs}
+
+        doctor_map: dict[uuid.UUID, uuid.UUID | None] = {}  # doctor_id -> location_id
+        if doctor_ids:
+            rs = (
+                await db.execute(
+                    select(Doctor.id, Doctor.location_id).where(Doctor.id.in_(doctor_ids))
+                )
+            ).all()
+            doctor_map = {r[0]: r[1] for r in rs}
+
+        # ---------- Step C: gather location ids from stores + doctors ----------
+        location_ids: set[uuid.UUID] = set()
+        for v in store_map.values():
+            if v is not None:
+                location_ids.add(v)
+        for v in doctor_map.values():
+            if v is not None:
+                location_ids.add(v)
+
+        location_map: dict[uuid.UUID, uuid.UUID] = {}  # location_id -> hq_id
+        if location_ids:
+            rs = (
+                await db.execute(
+                    select(Location.id, Location.headquarter_id).where(
+                        Location.id.in_(location_ids)
+                    )
+                )
+            ).all()
+            location_map = {r[0]: r[1] for r in rs}
+
+        # ---------- Step D: fetch headquarter -> state_id ----------
+        hq_ids: set[uuid.UUID] = {v for v in location_map.values() if v is not None}
+        hq_map: dict[uuid.UUID, uuid.UUID] = {}  # hq_id -> state_id
+        if hq_ids:
+            rs = (
+                await db.execute(
+                    select(Headquarter.id, Headquarter.state_id).where(Headquarter.id.in_(hq_ids))
+                )
+            ).all()
+            hq_map = {r[0]: r[1] for r in rs}
+
+        # ---------- Step E: per-row derivation ----------
+        for row in rows:
+            pid = _pid(row.get("product_id"))
+            sid = _pid(row.get("medical_store_id"))
+            did = _pid(row.get("doctor_id"))
+
+            division_id = product_map.get(pid) if pid else None
+
+            location_id: uuid.UUID | None = None
+            if sid is not None:
+                location_id = store_map.get(sid)
+            if location_id is None and did is not None:
+                location_id = doctor_map.get(did)
+
+            hq_id = location_map.get(location_id) if location_id else None
+            state_id = hq_map.get(hq_id) if hq_id else None
+
+            row["division_id"] = str(division_id) if division_id else None
+            row["location_id"] = str(location_id) if location_id else None
+            row["headquarter_id"] = str(hq_id) if hq_id else None
+            row["state_id"] = str(state_id) if state_id else None
 
     # ------------------------------------------------------------------
     # Allocation helpers

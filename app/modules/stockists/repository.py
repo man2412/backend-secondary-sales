@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.allocation import MrStoreAllocation
-from app.models.master import Headquarter, Location, State
+from app.models.master import Location
 from app.models.stockist import MedicalStore, Stockist, SuperStockist
 
 
@@ -21,7 +21,6 @@ class StockistsRepository:
         db: AsyncSession,
         *,
         q: str | None,
-        location_id: uuid.UUID | None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -31,9 +30,6 @@ class StockistsRepository:
         if active_only:
             base = base.where(SuperStockist.is_active.is_(True))
             count_q = count_q.where(SuperStockist.is_active.is_(True))
-        if location_id is not None:
-            base = base.where(SuperStockist.location_id == location_id)
-            count_q = count_q.where(SuperStockist.location_id == location_id)
         if q is not None and q.strip():
             term = f"%{q.strip()}%"
             base = base.where(
@@ -63,7 +59,6 @@ class StockistsRepository:
         drug_licence: str | None,
         pan: str | None,
         address: str | None,
-        location_id: uuid.UUID | None,
     ) -> SuperStockist:
         row = SuperStockist(
             name=name,
@@ -72,7 +67,6 @@ class StockistsRepository:
             drug_licence=drug_licence,
             pan=pan,
             address=address,
-            location_id=location_id,
             is_active=True,
         )
         db.add(row)
@@ -91,7 +85,6 @@ class StockistsRepository:
         drug_licence: str | None,
         pan: str | None,
         address: str | None,
-        location_id: uuid.UUID | None,
         is_active: bool | None,
     ) -> SuperStockist:
         if name is not None:
@@ -106,8 +99,6 @@ class StockistsRepository:
             row.pan = pan
         if address is not None:
             row.address = address
-        if location_id is not None:
-            row.location_id = location_id
         if is_active is not None:
             row.is_active = is_active
         await db.flush()
@@ -126,7 +117,6 @@ class StockistsRepository:
         *,
         q: str | None,
         super_stockist_id: uuid.UUID | None,
-        location_id: uuid.UUID | None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -139,9 +129,6 @@ class StockistsRepository:
         if super_stockist_id is not None:
             base = base.where(Stockist.super_stockist_id == super_stockist_id)
             count_q = count_q.where(Stockist.super_stockist_id == super_stockist_id)
-        if location_id is not None:
-            base = base.where(Stockist.location_id == location_id)
-            count_q = count_q.where(Stockist.location_id == location_id)
         if q is not None and q.strip():
             term = f"%{q.strip()}%"
             base = base.where(
@@ -172,7 +159,6 @@ class StockistsRepository:
         drug_licence: str | None,
         pan: str | None,
         address: str | None,
-        location_id: uuid.UUID | None,
     ) -> Stockist:
         row = Stockist(
             super_stockist_id=super_stockist_id,
@@ -182,7 +168,6 @@ class StockistsRepository:
             drug_licence=drug_licence,
             pan=pan,
             address=address,
-            location_id=location_id,
             is_active=True,
         )
         db.add(row)
@@ -202,7 +187,6 @@ class StockistsRepository:
         drug_licence: str | None,
         pan: str | None,
         address: str | None,
-        location_id: uuid.UUID | None,
         is_active: bool | None,
     ) -> Stockist:
         if super_stockist_id is not None:
@@ -219,8 +203,6 @@ class StockistsRepository:
             row.pan = pan
         if address is not None:
             row.address = address
-        if location_id is not None:
-            row.location_id = location_id
         if is_active is not None:
             row.is_active = is_active
         await db.flush()
@@ -294,6 +276,7 @@ class StockistsRepository:
         pan: str | None,
         address: str | None,
         location_id: uuid.UUID | None,
+        alternate_names: list[str] | None,
     ) -> MedicalStore:
         row = MedicalStore(
             stockist_id=stockist_id,
@@ -304,6 +287,7 @@ class StockistsRepository:
             pan=pan,
             address=address,
             location_id=location_id,
+            alternate_names=alternate_names,
             is_active=True,
         )
         db.add(row)
@@ -324,6 +308,7 @@ class StockistsRepository:
         pan: str | None,
         address: str | None,
         location_id: uuid.UUID | None,
+        alternate_names: list[str] | None,
         is_active: bool | None,
     ) -> MedicalStore:
         if stockist_id is not None:
@@ -342,6 +327,8 @@ class StockistsRepository:
             row.address = address
         if location_id is not None:
             row.location_id = location_id
+        if alternate_names is not None:
+            row.alternate_names = alternate_names
         if is_active is not None:
             row.is_active = is_active
         await db.flush()

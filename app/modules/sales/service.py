@@ -2,10 +2,10 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.allocation import MrDoctorAllocation, MrLocationAllocation, MrProductAllocation, MrStoreAllocation
+from app.models.allocation import MrDoctorAllocation, MrLocationAllocation, MrStoreAllocation
 from app.models.enums import UserRole
 from app.models.sale import SecondarySale
 from app.models.user import User
@@ -32,6 +32,58 @@ def _special_price_for_db(value: float | None) -> float | None:
     return value
 
 
+async def resolve_manager_chain(
+    db: AsyncSession, mr_id: uuid.UUID
+) -> dict[str, uuid.UUID | None]:
+    """
+    Walk the reports_to chain upward starting from `mr_id` and snapshot the first
+    user encountered for each manager-level role.
+
+    Returns a dict with keys: asm_id, rsm_id, state_head_id (any may be None).
+
+    The snapshot is stored on SecondarySale rows so that historical sales remain
+    visible to the manager who owned that MR at the time of the sale, even after
+    the MR is reassigned to a different manager.
+    """
+    q = text(
+        """
+        WITH RECURSIVE chain AS (
+            SELECT id, role, reports_to, 0 AS depth
+            FROM users WHERE id = :uid
+            UNION ALL
+            SELECT u.id, u.role, u.reports_to, c.depth + 1
+            FROM users u
+            INNER JOIN chain c ON c.reports_to = u.id
+        )
+        SELECT id, role FROM chain ORDER BY depth
+        """
+    )
+    rows = (await db.execute(q, {"uid": str(mr_id)})).fetchall()
+
+    asm_id: uuid.UUID | None = None
+    rsm_id: uuid.UUID | None = None
+    state_head_id: uuid.UUID | None = None
+
+    for row in rows:
+        uid_val, role_val = row[0], row[1]
+        role_str = role_val.value if hasattr(role_val, "value") else str(role_val)
+
+        if asm_id is None and role_str == UserRole.ASM.value:
+            asm_id = uuid.UUID(str(uid_val))
+        elif rsm_id is None and role_str in (
+            UserRole.RSM.value,
+            UserRole.DEPUTY_RSM.value,
+        ):
+            rsm_id = uuid.UUID(str(uid_val))
+        elif state_head_id is None and role_str == UserRole.STATE_HEAD.value:
+            state_head_id = uuid.UUID(str(uid_val))
+
+        if asm_id is not None and rsm_id is not None and state_head_id is not None:
+            break
+
+    return {"asm_id": asm_id, "rsm_id": rsm_id, "state_head_id": state_head_id}
+
+
 class SalesService:
     def __init__(self, repo: SalesRepository | None = None) -> None:
         self._repo = repo or SalesRepository()
@@ -39,26 +91,13 @@ class SalesService:
         self._doctors = DoctorsRepository()
         self._stockists = StockistsRepository()
 
-    async def _has_product_alloc(
-        self, db: AsyncSession, mr_id: uuid.UUID, product_id: uuid.UUID
-    ) -> bool:
-        r = await db.execute(
-            select(MrProductAllocation.id).where(
-                MrProductAllocation.mr_id == mr_id,
-                MrProductAllocation.product_id == product_id,
-                MrProductAllocation.is_active.is_(True),
-            )
-        )
-        return r.one_or_none() is not None
-
     async def _has_doctor_alloc(
-        self, db: AsyncSession, mr_id: uuid.UUID, doctor_id: uuid.UUID, division_id: uuid.UUID
+        self, db: AsyncSession, mr_id: uuid.UUID, doctor_id: uuid.UUID
     ) -> bool:
         r = await db.execute(
             select(MrDoctorAllocation.id).where(
                 MrDoctorAllocation.mr_id == mr_id,
                 MrDoctorAllocation.doctor_id == doctor_id,
-                MrDoctorAllocation.division_id == division_id,
                 MrDoctorAllocation.is_active.is_(True),
             )
         )
@@ -90,6 +129,9 @@ class SalesService:
         return {
             "id": row.id,
             "mr_id": row.mr_id,
+            "asm_id": row.asm_id,
+            "rsm_id": row.rsm_id,
+            "state_head_id": row.state_head_id,
             "product_id": row.product_id,
             "doctor_id": row.doctor_id,
             "medical_store_id": row.medical_store_id,
@@ -126,18 +168,25 @@ class SalesService:
         mr_id_filter: uuid.UUID | None,
         include_inactive: bool,
     ) -> tuple[list[dict], int]:
+        # `visible` is still used to validate the optional mr_id_filter and as
+        # the fallback set for legacy rows whose snapshot columns are NULL.
         visible = await UserService().get_visible_mr_ids(db, user)
-        if not visible:
+        if mr_id_filter is not None and user.role not in (
+            UserRole.SUPER_ADMIN,
+            UserRole.SALES_DIRECTOR,
+        ) and mr_id_filter not in visible:
+            raise PermissionError("Cannot list sales for this MR")
+        # MR shortcut: their visible set is just themselves; if empty (inactive),
+        # there's nothing to return.
+        if user.role == UserRole.MR and not visible:
             return [], 0
-        mr_ids = visible
-        if mr_id_filter is not None:
-            if mr_id_filter not in visible:
-                raise PermissionError("Cannot list sales for this MR")
-            mr_ids = [mr_id_filter]
         offset = (page - 1) * per_page
         rows, total = await self._repo.list_sales(
             db,
-            mr_ids=mr_ids,
+            caller_id=user.id,
+            caller_role=user.role,
+            fallback_mr_ids=list(visible),
+            mr_id_filter=mr_id_filter,
             sale_date=sale_date,
             active_only=not include_inactive,
             limit=per_page,
@@ -151,13 +200,33 @@ class SalesService:
         user: User,
         sale_id: uuid.UUID,
     ) -> dict | None:
-        visible = await UserService().get_visible_mr_ids(db, user)
         row = await self._repo.get_sale(db, sale_id)
         if row is None:
             return None
-        if row.mr_id not in visible:
+
+        if user.role in (UserRole.SUPER_ADMIN, UserRole.SALES_DIRECTOR):
+            return self._to_out(row)
+        if user.role == UserRole.MR:
+            return self._to_out(row) if row.mr_id == user.id else None
+
+        # Manager roles: prefer snapshot match; fall back to live subtree for
+        # rows persisted before snapshot columns existed.
+        if user.role == UserRole.ASM:
+            snapshot_id = row.asm_id
+        elif user.role in (UserRole.RSM, UserRole.DEPUTY_RSM):
+            snapshot_id = row.rsm_id
+        elif user.role == UserRole.STATE_HEAD:
+            snapshot_id = row.state_head_id
+        else:
             return None
-        return self._to_out(row)
+
+        if snapshot_id == user.id:
+            return self._to_out(row)
+        if snapshot_id is None:
+            visible = await UserService().get_visible_mr_ids(db, user)
+            if row.mr_id in visible:
+                return self._to_out(row)
+        return None
 
     async def create_sale(self, db: AsyncSession, user: User, body: SecondarySaleCreate) -> dict:
         if user.role == UserRole.MR:
@@ -189,16 +258,14 @@ class SalesService:
         div = await self._master.get_division(db, division_id)
         if div is None:
             raise ValueError("Invalid division for sale")
-        if not await self._has_product_alloc(db, mr_id, body.product_id):
-            raise ValueError("Product not allocated to you")
         if not await self._has_location_alloc(db, mr_id, body.location_id):
             raise ValueError("Location not allocated to you")
         if body.doctor_id is not None:
             doc = await self._doctors.get_doctor(db, body.doctor_id)
             if doc is None or not doc.is_active:
                 raise ValueError("Doctor not found")
-            if not await self._has_doctor_alloc(db, mr_id, body.doctor_id, product.division_id):
-                raise ValueError("Doctor not allocated for this product division")
+            if not await self._has_doctor_alloc(db, mr_id, body.doctor_id):
+                raise ValueError("Doctor not allocated to you")
         if body.medical_store_id is not None:
             st = await self._stockists.get_medical_store(db, body.medical_store_id)
             if st is None or not st.is_active:
@@ -208,9 +275,13 @@ class SalesService:
         n = await self._repo.count_mr_sales_on_date(db, mr_id=mr_id, sale_date=body.sale_date)
         if n >= MAX_SALES_PER_MR_PER_DAY:
             raise ValueError(f"Daily limit of {MAX_SALES_PER_MR_PER_DAY} active sales reached for this date")
+        chain = await resolve_manager_chain(db, mr_id)
         row = await self._repo.create_sale(
             db,
             mr_id=mr_id,
+            asm_id=chain["asm_id"],
+            rsm_id=chain["rsm_id"],
+            state_head_id=chain["state_head_id"],
             product_id=body.product_id,
             doctor_id=body.doctor_id,
             medical_store_id=body.medical_store_id,

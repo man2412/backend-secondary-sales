@@ -45,6 +45,24 @@ class UserRepository:
         result = await db.execute(q, {"mid": str(manager_id)})
         return [uuid.UUID(str(row[0])) for row in result.fetchall()]
 
+    async def list_user_ids_in_subtree(self, db: AsyncSession, manager_id: uuid.UUID) -> list[uuid.UUID]:
+        """All active user IDs (any role) in the reporting subtree below manager_id."""
+        q = text(
+            """
+            WITH RECURSIVE subtree AS (
+                SELECT id, reports_to FROM users WHERE id = :mid AND is_active = true
+                UNION ALL
+                SELECT u.id, u.reports_to
+                FROM users u
+                INNER JOIN subtree s ON u.reports_to = s.id
+                WHERE u.is_active = true
+            )
+            SELECT id FROM subtree
+            """
+        )
+        result = await db.execute(q, {"mid": str(manager_id)})
+        return [uuid.UUID(str(row[0])) for row in result.fetchall()]
+
     async def list_mr_ids_for_state_scope(self, db: AsyncSession, state_id: uuid.UUID) -> Sequence[uuid.UUID]:
         """MRs whose user.state_id matches (state_id on MR)."""
         result = await db.execute(
@@ -72,6 +90,7 @@ class UserRepository:
         q: str | None,
         role: UserRole | None,
         active_only: bool,
+        allowed_ids: Sequence[uuid.UUID] | None = None,
         limit: int,
         offset: int,
     ) -> tuple[Sequence[User], int]:
@@ -97,6 +116,9 @@ class UserRepository:
         if active_only:
             base = base.where(User.is_active.is_(True))
             count_q = count_q.where(User.is_active.is_(True))
+        if allowed_ids is not None:
+            base = base.where(User.id.in_(allowed_ids))
+            count_q = count_q.where(User.id.in_(allowed_ids))
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(User.full_name).offset(offset).limit(limit)
         rows = (await db.execute(base)).scalars().all()

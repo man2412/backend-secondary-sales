@@ -283,6 +283,7 @@ class MasterService:
             mrp=body.mrp,
             ptr=body.ptr,
             pts=body.pts,
+            net_rate=body.net_rate,
             hsn_code=body.hsn_code,
         )
 
@@ -305,6 +306,8 @@ class MasterService:
             mrp=data.get("mrp"),
             ptr=data.get("ptr"),
             pts=data.get("pts"),
+            net_rate=data.get("net_rate"),
+            net_rate_provided="net_rate" in data,
             hsn_code=data.get("hsn_code"),
             is_active=data.get("is_active"),
         )

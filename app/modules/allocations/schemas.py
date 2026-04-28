@@ -1,7 +1,10 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+# Sent for legacy clients that validate `division_id` as a required UUID (null breaks Zod `.uuid()`).
+_LEGACY_DIVISION_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
 
 class LocationAllocOut(BaseModel):
@@ -19,8 +22,22 @@ class DoctorAllocOut(BaseModel):
     mr_id: uuid.UUID
     doctor_id: uuid.UUID
     doctor_name: str | None
-    division_id: uuid.UUID
-    division_name: str | None
+    # Legacy shape: doctor allocations are no longer per-division. Use placeholder UUID + empty name
+    # so strict client schemas (e.g. z.string().uuid()) do not crash on null.
+    division_id: uuid.UUID = Field(default=_LEGACY_DIVISION_ID)
+    division_name: str = Field(default="")
+    allocated_by: uuid.UUID
+    allocated_at: datetime
+    is_active: bool
+
+
+class ProductAllocOut(BaseModel):
+    """Legacy response shape; list is always empty — product allocations were removed."""
+
+    id: uuid.UUID
+    mr_id: uuid.UUID
+    product_id: uuid.UUID
+    product_name: str | None = None
     allocated_by: uuid.UUID
     allocated_at: datetime
     is_active: bool
@@ -36,21 +53,11 @@ class StoreAllocOut(BaseModel):
     is_active: bool
 
 
-class ProductAllocOut(BaseModel):
-    id: uuid.UUID
-    mr_id: uuid.UUID
-    product_id: uuid.UUID
-    product_name: str | None
-    allocated_by: uuid.UUID
-    allocated_at: datetime
-    is_active: bool
-
-
 class AllocationsBundleOut(BaseModel):
     locations: list[LocationAllocOut]
     doctors: list[DoctorAllocOut]
     medical_stores: list[StoreAllocOut]
-    products: list[ProductAllocOut]
+    products: list[ProductAllocOut] = Field(default_factory=list)
 
 
 class LocationAllocCreate(BaseModel):
@@ -59,23 +66,18 @@ class LocationAllocCreate(BaseModel):
 
 class DoctorAllocCreate(BaseModel):
     doctor_id: uuid.UUID
-    division_id: uuid.UUID
 
 
 class StoreAllocCreate(BaseModel):
     medical_store_id: uuid.UUID
 
 
-class ProductAllocCreate(BaseModel):
-    product_id: uuid.UUID
-
-
 class AllocationOps(BaseModel):
-    add_locations: list[uuid.UUID] = []
-    remove_location_alloc_ids: list[uuid.UUID] = []
-    add_doctors: list[DoctorAllocCreate] = []
-    remove_doctor_alloc_ids: list[uuid.UUID] = []
-    add_stores: list[uuid.UUID] = []
-    remove_store_alloc_ids: list[uuid.UUID] = []
-    add_products: list[uuid.UUID] = []
-    remove_product_alloc_ids: list[uuid.UUID] = []
+    model_config = ConfigDict(extra="ignore")
+
+    add_locations: list[uuid.UUID] = Field(default_factory=list)
+    remove_location_alloc_ids: list[uuid.UUID] = Field(default_factory=list)
+    add_doctors: list[DoctorAllocCreate] = Field(default_factory=list)
+    remove_doctor_alloc_ids: list[uuid.UUID] = Field(default_factory=list)
+    add_stores: list[uuid.UUID] = Field(default_factory=list)
+    remove_store_alloc_ids: list[uuid.UUID] = Field(default_factory=list)

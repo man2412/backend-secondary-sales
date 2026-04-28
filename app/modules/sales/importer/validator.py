@@ -135,9 +135,13 @@ async def validate_rows(
         row["ptr"] = _parse_float(row.get("ptr"))
         row["reported_amount"] = _parse_float(row.get("reported_amount"))
 
-        # --- medical_store_id (optional) ---
+        # --- medical_store_id (required for import / commit) ---
         sid = _parse_uuid(row.get("medical_store_id"))
-        if sid is not None and sid not in valid_stores:
+        if sid is None:
+            errors.append(
+                "medical_store_id: missing or unresolved — assign a medical store before committing"
+            )
+        elif sid not in valid_stores:
             errors.append(f"medical_store_id: {sid} not found in medical_stores table")
             sid = None
         row["medical_store_id"] = str(sid) if sid else None

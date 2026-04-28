@@ -23,14 +23,11 @@ class MrLocationAllocation(Base):
 
 class MrDoctorAllocation(Base):
     __tablename__ = "mr_doctor_allocations"
-    __table_args__ = (UniqueConstraint("mr_id", "doctor_id", "division_id", name="uq_mr_doctor_div"),)
+    __table_args__ = (UniqueConstraint("mr_id", "doctor_id", name="uq_mr_doctor"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     mr_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"), nullable=False)
     doctor_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("doctors.id"), nullable=False)
-    division_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("divisions.id"), nullable=False
-    )
     allocated_by: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"), nullable=False)
     allocated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -47,18 +44,6 @@ class MrStoreAllocation(Base):
     medical_store_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("medical_stores.id"), nullable=False
     )
-    allocated_by: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    allocated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-
-
-class MrProductAllocation(Base):
-    __tablename__ = "mr_product_allocations"
-    __table_args__ = (UniqueConstraint("mr_id", "product_id", name="uq_mr_product"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    mr_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    product_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("products.id"), nullable=False)
     allocated_by: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"), nullable=False)
     allocated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

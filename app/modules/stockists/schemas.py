@@ -14,7 +14,6 @@ class SuperStockistOut(BaseModel):
     drug_licence: str | None
     pan: str | None
     address: str | None
-    location_id: uuid.UUID | None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -27,7 +26,6 @@ class SuperStockistCreate(BaseModel):
     drug_licence: str | None = None
     pan: str | None = None
     address: str | None = None
-    location_id: uuid.UUID | None = None
 
 
 class SuperStockistUpdate(BaseModel):
@@ -37,7 +35,6 @@ class SuperStockistUpdate(BaseModel):
     drug_licence: str | None = None
     pan: str | None = None
     address: str | None = None
-    location_id: uuid.UUID | None = None
     is_active: bool | None = None
 
 
@@ -52,7 +49,6 @@ class StockistOut(BaseModel):
     drug_licence: str | None
     pan: str | None
     address: str | None
-    location_id: uuid.UUID | None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -66,7 +62,6 @@ class StockistCreate(BaseModel):
     drug_licence: str | None = None
     pan: str | None = None
     address: str | None = None
-    location_id: uuid.UUID | None = None
 
 
 class StockistUpdate(BaseModel):
@@ -77,7 +72,6 @@ class StockistUpdate(BaseModel):
     drug_licence: str | None = None
     pan: str | None = None
     address: str | None = None
-    location_id: uuid.UUID | None = None
     is_active: bool | None = None
 
 
@@ -93,6 +87,7 @@ class MedicalStoreOut(BaseModel):
     pan: str | None
     address: str | None
     location_id: uuid.UUID | None
+    alternate_names: list[str] | None = None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -107,6 +102,7 @@ class MedicalStoreCreate(BaseModel):
     pan: str | None = None
     address: str | None = None
     location_id: uuid.UUID | None = None
+    alternate_names: list[str] | None = None
 
 
 class MedicalStoreUpdate(BaseModel):
@@ -118,4 +114,5 @@ class MedicalStoreUpdate(BaseModel):
     pan: str | None = None
     address: str | None = None
     location_id: uuid.UUID | None = None
+    alternate_names: list[str] | None = None
     is_active: bool | None = None

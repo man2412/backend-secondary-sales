@@ -254,6 +254,7 @@ class MasterRepository:
         mrp: float,
         ptr: float,
         pts: float,
+        net_rate: float | None,
         hsn_code: str | None,
     ) -> Product:
         row = Product(
@@ -263,6 +264,7 @@ class MasterRepository:
             mrp=mrp,
             ptr=ptr,
             pts=pts,
+            net_rate=net_rate,
             hsn_code=hsn_code,
             is_active=True,
         )
@@ -281,6 +283,8 @@ class MasterRepository:
         mrp: float | None,
         ptr: float | None,
         pts: float | None,
+        net_rate: float | None,
+        net_rate_provided: bool,
         hsn_code: str | None,
         is_active: bool | None,
     ) -> Product:
@@ -294,6 +298,8 @@ class MasterRepository:
             row.ptr = ptr
         if pts is not None:
             row.pts = pts
+        if net_rate_provided:
+            row.net_rate = net_rate
         if hsn_code is not None:
             row.hsn_code = hsn_code
         if is_active is not None:

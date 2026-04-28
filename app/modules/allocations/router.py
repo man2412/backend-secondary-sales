@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -10,6 +11,8 @@ from app.core.responses import ok
 from app.models.user import User
 from app.modules.allocations.schemas import AllocationOps
 from app.modules.allocations.service import AllocationsService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/allocations", tags=["allocations"])
 
@@ -29,6 +32,9 @@ async def get_mr_allocations(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except Exception:
+        logger.exception("get_mr_allocations failed mr_id=%s", mr_id)
+        raise
     return ok(data=bundle.model_dump(mode="json"))
 
 
@@ -45,4 +51,7 @@ async def apply_allocation_ops(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except Exception:
+        logger.exception("apply_allocation_ops failed mr_id=%s", mr_id)
+        raise
     return ok(data=bundle.model_dump(mode="json"), message="Updated")

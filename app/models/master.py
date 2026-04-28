@@ -65,5 +65,6 @@ class Product(Base, TimestampMixin):
     mrp: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     ptr: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     pts: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    net_rate: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
     hsn_code: Mapped[str | None] = mapped_column(String(50))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
