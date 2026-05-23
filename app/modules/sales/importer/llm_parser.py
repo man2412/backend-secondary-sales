@@ -27,6 +27,7 @@ import logging
 import os
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from app.core.config import settings
@@ -73,6 +74,10 @@ class LLMParseResponse:
     rows: list[dict] = field(default_factory=list)
     model_used: str = ""
     raw_response: dict = field(default_factory=dict)
+    # Per-chunk failure messages when chunking is used. Surfaced to the user
+    # as `extraction_warnings` on the import job so they know which chunk(s)
+    # produced no rows.
+    warnings: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +182,152 @@ def _call_mineru_extract(pdf_bytes: bytes, *, log_prefix: str = "") -> str:
                 os.unlink(tmp_path)
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Markdown chunking — split large MinerU markdown into N parallel chunks
+# ---------------------------------------------------------------------------
+#
+# Why chunking exists:
+#   Gemini output is autoregressive — it generates one token at a time at a
+#   roughly fixed rate. For a 60-page distributor report producing ~700 rows,
+#   the LLM has to emit ~50k output tokens which takes ~5 minutes wall-clock.
+#   Splitting the markdown into N chunks and calling Gemini N times in
+#   parallel cuts wall-clock latency by ~N (output throughput is the hard cap).
+#
+# How chunks are picked:
+#   We split ONLY at markdown heading boundaries (`^#`) so customer-section
+#   headers stay attached to their rows. If a heading section is so large
+#   that it would dominate the chunk, we still keep it whole — we never
+#   split mid-section and never split mid-table.
+#
+# Boundary correctness:
+#   With heading-aware splitting, each chunk is a self-contained "block of
+#   sections", so the LLM sees `Customer: XYZ Pharmacy` followed by its rows
+#   in the same chunk. After all chunks return, we run a deterministic dedupe
+#   pass keyed on (sale_date, customer, product, qty, bill_ref) which catches
+#   any ambiguous overlap.
+
+def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
+    """
+    Split markdown into roughly `n` chunks at heading boundaries — SAFELY.
+
+    Safety contract:
+      - We ONLY split at lines starting with `#` (any heading level).
+        Markdown tables, customer sections, and rows are never broken.
+      - If the markdown does not have enough heading boundaries to support
+        `n` chunks, we return `[text]` (a single chunk) and let the caller
+        fall back to a single LLM call.
+
+    This means: if the input doesn't have clean structural boundaries,
+    we choose accuracy over speed. The caller (parse_with_llm) checks
+    `len(chunks) <= 1` and uses single-call mode in that case.
+    """
+    if n <= 1 or not text:
+        return [text] if text else []
+
+    lines = text.splitlines(keepends=True)
+    if len(lines) < n * 2:
+        # Too small to split into n meaningful chunks.
+        return [text]
+
+    heading_idxs = [i for i, ln in enumerate(lines) if ln.lstrip().startswith("#")]
+
+    # We need AT LEAST `n - 1` boundaries (after dropping the optional leading
+    # heading at index 0) to make `n` chunks. Anything less and we refuse to
+    # chunk — a single LLM call is safer than a line-count split that could
+    # bisect a customer section or table.
+    boundary_candidates = [i for i in heading_idxs if i > 0]
+    if len(boundary_candidates) < n - 1:
+        return [text]
+
+    # Pick `n - 1` heading indexes evenly spaced through the candidates so the
+    # resulting chunks are roughly equal-sized. We pick boundary positions at
+    # fractions 1/n, 2/n, ..., (n-1)/n through the candidate list — this
+    # divides L candidates into n groups, never indexing past the end.
+    L = len(boundary_candidates)
+    if L == n - 1:
+        boundaries = list(boundary_candidates)
+    else:
+        boundaries = [boundary_candidates[(i * L) // n] for i in range(1, n)]
+
+    boundaries = sorted(set(boundaries))
+    chunks: list[str] = []
+    prev = 0
+    for b in boundaries:
+        chunks.append("".join(lines[prev:b]))
+        prev = b
+    chunks.append("".join(lines[prev:]))
+    chunks = [c for c in chunks if c.strip()]
+    # If anything went wrong and we ended up with the wrong count, refuse to
+    # chunk rather than risk a malformed split.
+    if len(chunks) < 2:
+        return [text]
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# Row deduplication — composite key on the natural identity of a sale row
+# ---------------------------------------------------------------------------
+#
+# Used after combining rows from parallel chunks. A row is uniquely identified
+# by (sale_date, customer_name, product_name, sale_qty, bill_ref). Repeats are
+# extremely rare for legitimate data — same product to same customer on same
+# day with same qty and same invoice ref — so collisions almost always mean
+# the LLM emitted the same physical row twice across chunk boundaries.
+
+def _dedupe_rows(raw_rows: list) -> tuple[list, int]:
+    """
+    Returns (unique_rows, removed_count). Order-stable; first occurrence wins.
+
+    Conservatism: we ONLY drop a duplicate when every component of the
+    composite key is non-empty. A row missing any key component (e.g. the
+    LLM didn't catch the bill_ref) is always kept — better to surface a
+    duplicate the user can review than to silently merge two legitimate
+    rows that happen to share product/customer/date/qty.
+
+    Composite key = (sale_date, customer, product, sale_qty, bill_ref).
+    """
+    seen: set[tuple] = set()
+    unique: list = []
+
+    for row in raw_rows:
+        if isinstance(row, (list, tuple)):
+            # _COLUMNS index map: 0 product, 1 sale_date, 2 sale_qty,
+            # 7 bill_ref, 10 customer_name
+            key = (
+                str(row[1] or "").strip() if len(row) > 1 else "",
+                str(row[10] or "").strip() if len(row) > 10 else "",
+                str(row[0] or "").strip() if len(row) > 0 else "",
+                str(row[2] or "").strip() if len(row) > 2 else "",
+                str(row[7] or "").strip() if len(row) > 7 else "",
+            )
+        elif isinstance(row, dict):
+            key = (
+                str(row.get("sale_date") or "").strip(),
+                str(row.get("customer_name_raw") or row.get("customer_name") or "").strip(),
+                str(row.get("product_name_raw") or row.get("product_name") or "").strip(),
+                str(row.get("sale_qty") or "").strip(),
+                str(row.get("bill_ref") or "").strip(),
+            )
+        else:
+            unique.append(row)
+            continue
+
+        # Conservative: only consider deduping when EVERY key component is
+        # populated. Missing fields → can't tell duplicate from coincidence,
+        # so always keep the row. The user reviews preview and can manually
+        # remove true duplicates.
+        if not all(key):
+            unique.append(row)
+            continue
+
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+
+    return unique, len(raw_rows) - len(unique)
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +466,141 @@ def _call_gemini(req: LLMParseRequest) -> tuple[dict, str]:
 
 
 # ---------------------------------------------------------------------------
+# Gemini chunked — parallel calls over markdown slices
+# ---------------------------------------------------------------------------
+
+def _call_gemini_chunked(
+    chunks: list[str],
+    *,
+    detected_fos_name: str | None,
+    log_prefix: str,
+) -> tuple[list, list[str]]:
+    """
+    Invoke Gemini in parallel for each markdown chunk and combine the row
+    arrays. Returns (combined_raw_rows, chunk_warnings).
+
+    Each chunk gets its own retry loop. If a chunk fails after retries, its
+    error is recorded as a warning and execution continues — the user still
+    gets rows from the chunks that succeeded. If ALL chunks fail, the first
+    exception is re-raised so the OpenAI fallback path can take over.
+    """
+    import google.generativeai as genai  # type: ignore
+
+    # Configure once for all parallel callers — global state, idempotent.
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+    model = genai.GenerativeModel(
+        model_name=_GEMINI_MODEL,
+        system_instruction=_SYSTEM_PROMPT,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0.0,
+            max_output_tokens=_MAX_OUTPUT_TOKENS,
+        ),
+    )
+
+    fos_hint = (
+        f"\n\nNote: the detected MR/FOS name for this file is '{detected_fos_name}'."
+        if detected_fos_name
+        else ""
+    )
+    n = len(chunks)
+
+    def _do_one(idx: int, chunk_text: str) -> tuple[int, list, Exception | None]:
+        chunk_prefix = f"{log_prefix}[c{idx + 1}/{n}]"
+        user_part = (
+            f"Extract all sale rows from the following distributor report "
+            f"(this is part {idx + 1} of {n}, sent in parallel — extract only "
+            f"what is in this part).{fos_hint}\n\n{chunk_text}"
+        )
+        last_exc: Exception | None = None
+        t_chunk = time.perf_counter()
+        for attempt in range(_GEMINI_MAX_ATTEMPTS):
+            t_attempt = time.perf_counter()
+            try:
+                response = model.generate_content(
+                    [user_part],
+                    request_options={"timeout": _GEMINI_TIMEOUT_S},
+                )
+                attempt_ms = (time.perf_counter() - t_attempt) * 1000
+                response_text = response.text or ""
+                parsed = json.loads(response_text)
+                rows = parsed.get("rows", []) if isinstance(parsed, dict) else []
+                if not isinstance(rows, list):
+                    rows = []
+                logger.info(
+                    "%s gemini ok response_chars=%d rows=%d "
+                    "attempt_ms=%.0f total_ms=%.0f",
+                    chunk_prefix, len(response_text), len(rows),
+                    attempt_ms, (time.perf_counter() - t_chunk) * 1000,
+                )
+                return idx, rows, None
+
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                attempt_ms = (time.perf_counter() - t_attempt) * 1000
+                if attempt + 1 < _GEMINI_MAX_ATTEMPTS and _is_transient_gemini_error(exc):
+                    delay = _GEMINI_BACKOFF_SECONDS[attempt]
+                    logger.warning(
+                        "%s gemini attempt %d/%d failed (%s: %s) "
+                        "attempt_ms=%.0f — retrying in %ds",
+                        chunk_prefix, attempt + 1, _GEMINI_MAX_ATTEMPTS,
+                        type(exc).__name__, exc, attempt_ms, delay,
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.warning(
+                        "%s gemini attempt %d/%d failed (%s: %s) "
+                        "attempt_ms=%.0f — no more retries",
+                        chunk_prefix, attempt + 1, _GEMINI_MAX_ATTEMPTS,
+                        type(exc).__name__, exc, attempt_ms,
+                    )
+                    break
+
+        return idx, [], last_exc
+
+    logger.info(
+        "%s gemini-chunked: starting n=%d sizes=%s",
+        log_prefix, n, [len(c) for c in chunks],
+    )
+    t_total = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        futures = [ex.submit(_do_one, i, c) for i, c in enumerate(chunks)]
+        results = [f.result() for f in futures]
+
+    # Stable order (chunk 1 rows come before chunk 2 rows in the combined list).
+    results.sort(key=lambda r: r[0])
+
+    combined: list = []
+    warnings: list[str] = []
+    failed_count = 0
+    for idx, rows, err in results:
+        if err is not None:
+            failed_count += 1
+            warnings.append(
+                f"Chunk {idx + 1} of {n} failed after retries "
+                f"({type(err).__name__}: {err}). Some rows from that section "
+                f"of the file are missing — re-upload to retry."
+            )
+        else:
+            combined.extend(rows)
+
+    total_ms = (time.perf_counter() - t_total) * 1000
+    logger.info(
+        "%s gemini-chunked: done chunks_ok=%d/%d combined_rows=%d total_ms=%.0f",
+        log_prefix, n - failed_count, n, len(combined), total_ms,
+    )
+
+    if failed_count == n:
+        # All chunks failed — propagate the first error so the OpenAI fallback
+        # in parse_with_llm gets a chance.
+        first_err = next((e for _, _, e in results if e is not None), None)
+        assert first_err is not None
+        raise first_err
+
+    return combined, warnings
+
+
+# ---------------------------------------------------------------------------
 # OpenAI  (fallback) — text only; PDFs are pre-converted via pdfplumber
 # ---------------------------------------------------------------------------
 
@@ -430,24 +716,29 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
     t_total = time.perf_counter()
     logger.info(
         "%s parse_with_llm: starting is_pdf=%s pdf_bytes=%d text_chars=%d "
-        "mineru_enabled=%s gemini_enabled=%s openai_enabled=%s",
+        "mineru_enabled=%s gemini_enabled=%s openai_enabled=%s "
+        "chunk_count=%d chunk_min_chars=%d",
         log_prefix, req.is_pdf,
         len(req.pdf_bytes or b""), len(req.raw_text or ""),
         bool(settings.MINERU_API_KEY),
         bool(settings.GEMINI_API_KEY),
         bool(settings.OPENAI_API_KEY),
+        settings.IMPORT_CHUNK_COUNT,
+        settings.IMPORT_CHUNK_MIN_CHARS,
     )
 
     # --- Step 0: MinerU pre-extraction for PDFs ---
     # Run this BEFORE any LLM call so both Gemini and the OpenAI fallback
     # receive clean markdown text rather than a binary PDF.
     effective_req = req
+    came_from_mineru = False
     if req.is_pdf and req.pdf_bytes and settings.MINERU_API_KEY:
         try:
             markdown = _call_mineru_extract(req.pdf_bytes, log_prefix=log_prefix)
             effective_req = LLMParseRequest(
                 raw_text=markdown, is_pdf=False, log_prefix=log_prefix,
             )
+            came_from_mineru = True
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "%s parse_with_llm: MinerU failed (%s: %s) — falling back to Gemini Files API",
@@ -455,13 +746,79 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
             )
             # effective_req stays as original req; Gemini Files API path used below
 
-    raw: dict = {}
+    # Chunking is only safe when:
+    #   - we have markdown from MinerU (heading-structured, dedupe-friendly)
+    #   - text is large enough that the savings outweigh the overhead
+    #   - chunk count is configured > 1
+    # We do NOT chunk:
+    #   - binary PDF (Gemini Files API)
+    #   - tabular CSV/XLSX text (no heading structure; chunking risks losing
+    #     header context across slices)
+    can_chunk = (
+        came_from_mineru
+        and settings.IMPORT_CHUNK_COUNT > 1
+        and len(effective_req.raw_text or "") >= settings.IMPORT_CHUNK_MIN_CHARS
+    )
+
+    raw_rows: list = []
     model_used = ""
+    chunk_warnings: list[str] = []
+    pre_dedupe_count = 0
 
     _gemini_error: Exception | None = None
     if settings.GEMINI_API_KEY:
         try:
-            raw, model_used = _call_gemini(effective_req)
+            if can_chunk:
+                chunks = _split_markdown_into_chunks(
+                    effective_req.raw_text or "",
+                    settings.IMPORT_CHUNK_COUNT,
+                )
+                if len(chunks) <= 1:
+                    # Splitter refused — the markdown didn't have enough
+                    # heading boundaries to chunk safely. This is a
+                    # SAFETY-OVER-SPEED decision, not a failure: accuracy is
+                    # preserved by falling back to single-call. We log at
+                    # WARNING level so this branch is easy to monitor in
+                    # production — if it fires on most files, MinerU's
+                    # output structure is weak and we're losing the
+                    # parallelism benefit consistently.
+                    md = effective_req.raw_text or ""
+                    heading_count = sum(
+                        1 for ln in md.splitlines() if ln.lstrip().startswith("#")
+                    )
+                    logger.warning(
+                        "%s parse_with_llm: chunking SKIPPED — markdown_chars=%d "
+                        "heading_lines=%d requested_chunks=%d (need ≥%d heading "
+                        "boundaries past line 0). Falling back to single call — "
+                        "accuracy preserved, latency unchanged from baseline.",
+                        log_prefix, len(md), heading_count,
+                        settings.IMPORT_CHUNK_COUNT,
+                        settings.IMPORT_CHUNK_COUNT - 1,
+                    )
+                    raw, model_used = _call_gemini(effective_req)
+                    raw_rows = raw.get("rows", []) if isinstance(raw, dict) else []
+                    if not isinstance(raw_rows, list):
+                        raw_rows = []
+                else:
+                    raw_rows, chunk_warnings = _call_gemini_chunked(
+                        chunks,
+                        detected_fos_name=effective_req.detected_fos_name,
+                        log_prefix=log_prefix,
+                    )
+                    pre_dedupe_count = len(raw_rows)
+                    raw_rows, removed = _dedupe_rows(raw_rows)
+                    if removed:
+                        logger.info(
+                            "%s parse_with_llm: dedupe removed %d duplicate row(s) "
+                            "across chunks (kept %d)",
+                            log_prefix, removed, len(raw_rows),
+                        )
+                    model_used = _GEMINI_MODEL
+            else:
+                raw, model_used = _call_gemini(effective_req)
+                raw_rows = raw.get("rows", []) if isinstance(raw, dict) else []
+                if not isinstance(raw_rows, list):
+                    raw_rows = []
         except Exception as exc:  # noqa: BLE001
             _gemini_error = exc
             logger.warning(
@@ -472,6 +829,9 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
     if not model_used and settings.OPENAI_API_KEY:
         try:
             raw, model_used = _call_openai(effective_req)
+            raw_rows = raw.get("rows", []) if isinstance(raw, dict) else []
+            if not isinstance(raw_rows, list):
+                raw_rows = []
         except Exception as exc:
             logger.error(
                 "%s parse_with_llm: OpenAI fallback also failed (%s: %s)",
@@ -488,19 +848,20 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
             ) from _gemini_error
         raise RuntimeError("LLM call returned no model_used (unknown reason)")
 
-    raw_rows = raw.get("rows", [])
-    if not isinstance(raw_rows, list):
-        raw_rows = []
     rows = _rows_to_dicts(raw_rows)
 
     logger.info(
-        "%s parse_with_llm: done model=%s raw_rows=%d kept_rows=%d total_ms=%.0f",
-        log_prefix, model_used, len(raw_rows), len(rows),
+        "%s parse_with_llm: done model=%s chunked=%s raw_rows=%d "
+        "(pre_dedupe=%d) kept_rows=%d warnings=%d total_ms=%.0f",
+        log_prefix, model_used, can_chunk,
+        len(raw_rows), pre_dedupe_count or len(raw_rows),
+        len(rows), len(chunk_warnings),
         (time.perf_counter() - t_total) * 1000,
     )
 
     return LLMParseResponse(
         rows=rows,
         model_used=model_used,
-        raw_response=raw,
+        raw_response={"rows": raw_rows},
+        warnings=chunk_warnings,
     )

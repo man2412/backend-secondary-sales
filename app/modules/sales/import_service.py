@@ -271,7 +271,9 @@ class ImportService:
                 except ValueError:
                     pass
         mrs_without_alloc = await self._find_mrs_without_allocations(db, mr_ids_in_rows)
-        warnings: list[str] = list(mr_resolution_warnings)
+        # Order: chunk-level failures first (most actionable — user can re-upload),
+        # then MR-resolution issues, then allocation issues.
+        warnings: list[str] = list(resp.warnings) + list(mr_resolution_warnings)
         if mrs_without_alloc:
             names = await self._get_user_names(db, mrs_without_alloc)
             warnings.append(

@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     # Set to DEBUG when investigating slow imports / failures.
     LOG_LEVEL: str = "INFO"
 
+    # ---- Import-flow chunking (PDF only, post-MinerU) ----
+    # Number of parallel Gemini calls to split the markdown into. Latency
+    # roughly = (single_call_latency / IMPORT_CHUNK_COUNT) since output token
+    # generation is the bottleneck. Set to 1 to disable chunking.
+    IMPORT_CHUNK_COUNT: int = 3
+    # Don't bother chunking inputs smaller than this — overhead > savings.
+    IMPORT_CHUNK_MIN_CHARS: int = 8000
+
     @field_validator("GEMINI_API_KEY", "OPENAI_API_KEY", "MINERU_API_KEY", mode="before")
     @classmethod
     def _normalize_api_key(cls, v: object) -> str:
