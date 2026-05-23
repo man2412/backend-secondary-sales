@@ -188,82 +188,134 @@ def _call_mineru_extract(pdf_bytes: bytes, *, log_prefix: str = "") -> str:
 # Markdown chunking — split large MinerU markdown into N parallel chunks
 # ---------------------------------------------------------------------------
 #
-# Why chunking exists:
-#   Gemini output is autoregressive — it generates one token at a time at a
-#   roughly fixed rate. For a 60-page distributor report producing ~700 rows,
-#   the LLM has to emit ~50k output tokens which takes ~5 minutes wall-clock.
-#   Splitting the markdown into N chunks and calling Gemini N times in
-#   parallel cuts wall-clock latency by ~N (output throughput is the hard cap).
+# Two PDF output structures from MinerU, both handled:
 #
-# How chunks are picked:
-#   We split ONLY at markdown heading boundaries (`^#`) so customer-section
-#   headers stay attached to their rows. If a heading section is so large
-#   that it would dominate the chunk, we still keep it whole — we never
-#   split mid-section and never split mid-table.
+#  Structure A — "section-per-customer" (structured PDF):
+#    ## Customer: ABC Pharmacy
+#    | Product | Qty | ...
+#    ## Customer: XYZ Drug
+#    | Product | Qty | ...
+#    → Split at `#` heading boundaries. Each chunk gets self-contained sections.
 #
-# Boundary correctness:
-#   With heading-aware splitting, each chunk is a self-contained "block of
-#   sections", so the LLM sees `Customer: XYZ Pharmacy` followed by its rows
-#   in the same chunk. After all chunks return, we run a deterministic dedupe
-#   pass keyed on (sale_date, customer, product, qty, bill_ref) which catches
-#   any ambiguous overlap.
+#  Structure B — "multi-page table" (distributor report, most common):
+#    MinerU emits ONE separate markdown table per PDF page.
+#    Each page table starts with a column-header row + |---| separator, then
+#    customer-section rows (colspan → | CUSTOMER NAME | | | | ... |) and
+#    data rows.  Customers that span pages are safe to split: MinerU repeats
+#    the customer-name row on the continuation page's table.
+#    → Detect all table-start (header+separator) pairs; split at page boundaries.
 
 def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
     """
-    Split markdown into roughly `n` chunks at heading boundaries — SAFELY.
+    Split MinerU markdown into `n` safe parallel chunks.
 
-    Safety contract:
-      - We ONLY split at lines starting with `#` (any heading level).
-        Markdown tables, customer sections, and rows are never broken.
-      - If the markdown does not have enough heading boundaries to support
-        `n` chunks, we return `[text]` (a single chunk) and let the caller
-        fall back to a single LLM call.
+    Strategy (tried in order — stops at first that works):
 
-    This means: if the input doesn't have clean structural boundaries,
-    we choose accuracy over speed. The caller (parse_with_llm) checks
-    `len(chunks) <= 1` and uses single-call mode in that case.
+    1. Heading split: split at `#` boundaries. For section-per-customer PDFs
+       where MinerU emits one `##` heading per customer. Requires ≥ n-1
+       heading boundaries after line 0.
+
+    2. Page-table-boundary split: for multi-page distributor reports where
+       MinerU emits one markdown table per PDF page. Detects each table-start
+       (column-header row + |---| separator) and splits at page boundaries.
+       Safe because cross-page customer sections have their header row repeated
+       by MinerU on the continuation page. Requires ≥ n page tables.
+
+    3. Single call: if neither works, return [text]. The caller detects this
+       and uses single-call mode (accuracy preserved, no speedup).
     """
     if n <= 1 or not text:
         return [text] if text else []
 
     lines = text.splitlines(keepends=True)
     if len(lines) < n * 2:
-        # Too small to split into n meaningful chunks.
         return [text]
 
+    # --- Strategy 1: heading-based split ---
     heading_idxs = [i for i, ln in enumerate(lines) if ln.lstrip().startswith("#")]
-
-    # We need AT LEAST `n - 1` boundaries (after dropping the optional leading
-    # heading at index 0) to make `n` chunks. Anything less and we refuse to
-    # chunk — a single LLM call is safer than a line-count split that could
-    # bisect a customer section or table.
     boundary_candidates = [i for i in heading_idxs if i > 0]
-    if len(boundary_candidates) < n - 1:
-        return [text]
+    if len(boundary_candidates) >= n - 1:
+        L = len(boundary_candidates)
+        if L == n - 1:
+            boundaries = list(boundary_candidates)
+        else:
+            boundaries = [boundary_candidates[(i * L) // n] for i in range(1, n)]
+        boundaries = sorted(set(boundaries))
+        chunks: list[str] = []
+        prev = 0
+        for b in boundaries:
+            chunks.append("".join(lines[prev:b]))
+            prev = b
+        chunks.append("".join(lines[prev:]))
+        chunks = [c for c in chunks if c.strip()]
+        if len(chunks) >= 2:
+            return chunks
 
-    # Pick `n - 1` heading indexes evenly spaced through the candidates so the
-    # resulting chunks are roughly equal-sized. We pick boundary positions at
-    # fractions 1/n, 2/n, ..., (n-1)/n through the candidate list — this
-    # divides L candidates into n groups, never indexing past the end.
-    L = len(boundary_candidates)
-    if L == n - 1:
-        boundaries = list(boundary_candidates)
-    else:
-        boundaries = [boundary_candidates[(i * L) // n] for i in range(1, n)]
+    # --- Strategy 2: page-table-boundary split ---
+    #
+    # MinerU emits ONE markdown table per PDF page. Each page table starts with
+    # a column-header row immediately followed by a |---| separator row, e.g.:
+    #
+    #   | Product | Pack | BillRef | Date | MRP Batch | Qty | Free | Rate | Amount |
+    #   |---|---|---|---|---|---|---|---|---|
+    #   | KRISHANA MEDICINES, RAJKOT... | | | | | | | | |   ← customer-section row
+    #   | JUGSI DM FORTE TAB | 10 TAB | GCD/757 | ...      ← data row
+    #   ...
+    #
+    # Customer sections that span PDF pages are safe to split between: MinerU
+    # repeats the customer-name row at the top of the continuation table on the
+    # next page, so every chunk is self-contained and the LLM never loses context.
 
-    boundaries = sorted(set(boundaries))
-    chunks: list[str] = []
-    prev = 0
-    for b in boundaries:
-        chunks.append("".join(lines[prev:b]))
-        prev = b
-    chunks.append("".join(lines[prev:]))
-    chunks = [c for c in chunks if c.strip()]
-    # If anything went wrong and we ended up with the wrong count, refuse to
-    # chunk rather than risk a malformed split.
-    if len(chunks) < 2:
-        return [text]
-    return chunks
+    def _is_sep(ln: str) -> bool:
+        s = ln.strip()
+        return (
+            s.startswith("|")
+            and bool(s)
+            and all(c in "|-: \t" for c in s)
+            and "-" in s
+        )
+
+    # Walk lines once to find every table-start position:
+    # a non-separator | row immediately followed (skipping blanks) by a separator.
+    table_start_idxs: list[int] = []
+    k = 0
+    while k < len(lines):
+        ln = lines[k]
+        stripped = ln.strip()
+        if stripped.startswith("|") and not _is_sep(ln):
+            # Peek ahead for separator
+            j = k + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and _is_sep(lines[j]):
+                table_start_idxs.append(k)
+                k = j + 1
+                continue
+        k += 1
+
+    # Need at least n distinct page-tables to split into n chunks.
+    if len(table_start_idxs) >= n:
+        # Candidate boundaries: every table-start after the very first one.
+        boundary_candidates = table_start_idxs[1:]
+        L = len(boundary_candidates)
+        if L >= n - 1:
+            if L == n - 1:
+                boundaries = list(boundary_candidates)
+            else:
+                boundaries = [boundary_candidates[(m * L) // n] for m in range(1, n)]
+            boundaries = sorted(set(boundaries))
+            chunks: list[str] = []
+            prev = 0
+            for b in boundaries:
+                chunks.append("".join(lines[prev:b]))
+                prev = b
+            chunks.append("".join(lines[prev:]))
+            chunks = [c for c in chunks if c.strip()]
+            if len(chunks) >= 2:
+                return chunks
+
+    # --- Strategy 3: refuse to chunk ---
+    return [text]
 
 
 # ---------------------------------------------------------------------------
@@ -774,26 +826,21 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
                     settings.IMPORT_CHUNK_COUNT,
                 )
                 if len(chunks) <= 1:
-                    # Splitter refused — the markdown didn't have enough
-                    # heading boundaries to chunk safely. This is a
-                    # SAFETY-OVER-SPEED decision, not a failure: accuracy is
-                    # preserved by falling back to single-call. We log at
-                    # WARNING level so this branch is easy to monitor in
-                    # production — if it fires on most files, MinerU's
-                    # output structure is weak and we're losing the
-                    # parallelism benefit consistently.
+                    # Both heading-split and table-row-split refused — the
+                    # markdown structure isn't recognisable enough to chunk
+                    # safely. Accuracy is preserved; latency is unchanged.
+                    # Log at WARNING so this is easy to monitor in production.
                     md = effective_req.raw_text or ""
-                    heading_count = sum(
-                        1 for ln in md.splitlines() if ln.lstrip().startswith("#")
-                    )
+                    md_lines = md.splitlines()
+                    heading_count = sum(1 for ln in md_lines if ln.lstrip().startswith("#"))
+                    table_row_count = sum(1 for ln in md_lines if ln.strip().startswith("|"))
                     logger.warning(
-                        "%s parse_with_llm: chunking SKIPPED — markdown_chars=%d "
-                        "heading_lines=%d requested_chunks=%d (need ≥%d heading "
-                        "boundaries past line 0). Falling back to single call — "
-                        "accuracy preserved, latency unchanged from baseline.",
+                        "%s parse_with_llm: chunking SKIPPED (both strategies "
+                        "failed) — markdown_chars=%d heading_lines=%d "
+                        "table_rows=%d requested_chunks=%d. "
+                        "Falling back to single call — accuracy preserved.",
                         log_prefix, len(md), heading_count,
-                        settings.IMPORT_CHUNK_COUNT,
-                        settings.IMPORT_CHUNK_COUNT - 1,
+                        table_row_count, settings.IMPORT_CHUNK_COUNT,
                     )
                     raw, model_used = _call_gemini(effective_req)
                     raw_rows = raw.get("rows", []) if isinstance(raw, dict) else []
