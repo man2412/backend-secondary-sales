@@ -139,11 +139,14 @@ async def upload_import_job(
     db: Annotated[AsyncSession, Depends(get_db)],
     current: Annotated[User, Depends(get_current_user)],
     file: Annotated[UploadFile, File(description="Upload .pdf, .xlsx, .xls, or .csv")],
-    mr_id: Annotated[UUID | None, Query(description="MR this import belongs to (optional if FOS name is in file)")] = None,
 ) -> dict:
     """
     Upload a distributor sales file. Processing (LLM parse + validation) runs in the background.
     Poll GET /import-jobs/{id}/preview until status = ready.
+
+    `mr_id` is no longer accepted at upload — every row's MR is resolved from
+    its medical store (doctors at that store → active MR allocation).
+
     Limits: 10 MB / 150 PDF pages / 10,000 Excel-CSV rows.
     """
     content = await file.read()
@@ -174,7 +177,6 @@ async def upload_import_job(
             filename=filename,
             content=content,
             uploaded_by=current.id,
-            mr_id=mr_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e

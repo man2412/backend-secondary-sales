@@ -58,7 +58,6 @@ class ImportService:
         filename: str,
         content: bytes,
         uploaded_by: uuid.UUID,
-        mr_id: uuid.UUID | None,
     ) -> ImportJob:
         ext = filename.rsplit(".", 1)[-1].lower()
         try:
@@ -68,12 +67,14 @@ class ImportService:
 
         file_hash = hashlib.sha256(content).hexdigest()
 
+        # `mr_id` on ImportJob is no longer set at upload time. Per-row MR
+        # resolution happens in _do_process via store → doctor → MR allocation.
         job = ImportJob(
             filename=filename,
             file_hash=file_hash,
             source_type=source_type,
             uploaded_by=uploaded_by,
-            mr_id=mr_id,
+            mr_id=None,
             status=ImportJobStatus.processing,
         )
         db.add(job)
@@ -119,10 +120,14 @@ class ImportService:
         job: ImportJob,
         content: bytes,
     ) -> None:
-        # 1. Extract: PDFs → raw bytes; tabular → minimal CSV text
-        result: ExtractionResult = extract(job.filename, content)
+        # 1. Extract: PDFs → raw bytes; tabular → minimal CSV text.
+        #    FOS-hint detection is no longer needed for resolution (mr_id is
+        #    now derived from medical_store → doctor → MR allocation), so we
+        #    skip the second PDF parse entirely. Tabular extraction picks up
+        #    the FOS name for free as it scans rows; we keep that for display.
+        result: ExtractionResult = extract(job.filename, content, detect_fos=False)
         job.raw_text = result.raw_text or ""
-        if result.detected_fos_name and job.mr_id is None:
+        if result.detected_fos_name:
             job.detected_fos_name = result.detected_fos_name
 
         # 2. Single LLM call — no entity lists, just file/text
@@ -130,34 +135,37 @@ class ImportService:
             raw_text=result.raw_text,
             pdf_bytes=result.raw_bytes,
             is_pdf=result.is_pdf,
-            detected_fos_name=result.detected_fos_name,
+            detected_fos_name=None,
         )
         resp: LLMParseResponse = await asyncio.to_thread(parse_with_llm, req)
 
-        # 3. Load all entities for backend fuzzy matching
+        # 3. Load entity catalogues for backend fuzzy matching
+        #    (MRs are resolved from store → doctor allocations, not by name)
         products = await self._get_all_products(db)
         medical_stores = await self._get_all_stores(db)
-        mrs = await self._get_all_mrs(db, job_mr_id=job.mr_id)
         doctors = await self._get_all_doctors(db)
 
-        # 4. Fuzzy resolve raw names → UUIDs
+        # 4. Fuzzy resolve product / store / doctor names → UUIDs
         resolved_rows = self._fuzzy_resolve_entities(
-            resp.rows, products, medical_stores, mrs, doctors, job.mr_id
+            resp.rows, products, medical_stores, doctors
         )
 
-        # 5. Deterministic validation + type coercion
-        validated = await validate_rows(db, resolved_rows, job_mr_id=job.mr_id)
+        # 5. Resolve mr_id from each row's medical_store_id via:
+        #       doctor_medical_stores → mr_doctor_allocations (is_active)
+        #    Returns warnings for stores with 0 or multiple distinct MRs.
+        mr_resolution_warnings = await self._resolve_mrs_from_stores(db, resolved_rows)
 
-        # 5b. Display names follow DB for resolved ids; null ids → null names (user fills in UI)
+        # 6. Deterministic validation + type coercion
+        validated = await validate_rows(db, resolved_rows)
+
+        # 6b. Display names follow DB for resolved ids; null ids → null names (user fills in UI)
         await self._hydrate_raw_names_from_db(db, validated)
 
-        # 5c. Auto-populate derived fields (division/location/hq/state + doctor auto-fill)
+        # 6c. Auto-populate derived fields (division/location/hq/state + doctor auto-fill)
         await self._enrich_derived_fields(db, validated)
 
-        # 6. Up-front allocation warning so user sees it at preview, not after commit
+        # 7. Up-front allocation warning so user sees it at preview, not after commit
         mr_ids_in_rows: set[uuid.UUID] = set()
-        if job.mr_id is not None:
-            mr_ids_in_rows.add(job.mr_id)
         for r in validated:
             if r.get("mr_id"):
                 try:
@@ -165,7 +173,7 @@ class ImportService:
                 except ValueError:
                     pass
         mrs_without_alloc = await self._find_mrs_without_allocations(db, mr_ids_in_rows)
-        warnings: list[str] = []
+        warnings: list[str] = list(mr_resolution_warnings)
         if mrs_without_alloc:
             names = await self._get_user_names(db, mrs_without_alloc)
             warnings.append(
@@ -173,7 +181,7 @@ class ImportService:
                 "commits for their rows will be skipped: " + ", ".join(names)
             )
 
-        # 7. Persist
+        # 8. Persist
         job.structured_rows = validated
         job.total_rows = len(validated)
         job.model_used = resp.model_used or None
@@ -192,9 +200,7 @@ class ImportService:
         rows: list[dict],
         products: list[EntityCandidate],
         medical_stores: list[EntityCandidate],
-        mrs: list[EntityCandidate],
         doctors: list[EntityCandidate],
-        job_mr_id: uuid.UUID | None,
     ) -> list[dict]:
         """
         Five-level fuzzy match raw LLM-extracted names to entity UUIDs:
@@ -206,43 +212,83 @@ class ImportService:
           5. difflib.get_close_matches with cutoff 0.6
 
         Unresolved names are left as None — the frontend handles manual assignment.
+
+        Note: MR names are NOT fuzzy-matched here. mr_id is resolved separately
+        via `_resolve_mrs_from_stores` using the medical-store → doctor → MR
+        allocation chain.
+
+        Implementation note: levels 1-2 are O(1) dict lookups; levels 3-4 are
+        linear scans (kept on the precomputed normalized list); level 5 uses
+        difflib. Per-row results are also memoized so repeated raw names in
+        large files cost nothing after the first row.
         """
         prod_uppers = [(c.name or "").upper() for c in products]
         store_uppers = [(c.name or "").upper() for c in medical_stores]
-        mr_uppers = [(c.name or "").upper() for c in mrs]
         doc_uppers = [(c.name or "").upper() for c in doctors]
 
         prod_norms = [_normalize(c.name) for c in products]
         store_norms = [_normalize(c.name) for c in medical_stores]
-        mr_norms = [_normalize(c.name) for c in mrs]
         doc_norms = [_normalize(c.name) for c in doctors]
+
+        # Build O(1) lookup dicts for levels 1 & 2. First-occurrence wins so
+        # behaviour matches the original linear-scan tie-breaking exactly.
+        def _build_dict(keys: list[str], cands: list[EntityCandidate]) -> dict[str, str]:
+            d: dict[str, str] = {}
+            for i, k in enumerate(keys):
+                if k and k not in d:
+                    d[k] = cands[i].id
+            return d
+
+        prod_upper_map = _build_dict(prod_uppers, products)
+        prod_norm_map = _build_dict(prod_norms, products)
+        store_upper_map = _build_dict(store_uppers, medical_stores)
+        store_norm_map = _build_dict(store_norms, medical_stores)
+        doc_upper_map = _build_dict(doc_uppers, doctors)
+        doc_norm_map = _build_dict(doc_norms, doctors)
+
+        # Per-entity-type cache so repeated raw names don't redo the heavy work.
+        _SENTINEL = object()
+        prod_cache: dict[str, str | None] = {}
+        store_cache: dict[str, str | None] = {}
+        doc_cache: dict[str, str | None] = {}
 
         def match(
             raw: str | None,
             candidates: list[EntityCandidate],
-            uppers: list[str],
+            upper_map: dict[str, str],
+            norm_map: dict[str, str],
             norms: list[str],
+            cache: dict[str, str | None],
         ) -> str | None:
             if not raw or not candidates:
                 return None
 
+            cached = cache.get(raw, _SENTINEL)
+            if cached is not _SENTINEL:
+                return cached  # type: ignore[return-value]
+
             ru = raw.upper().strip()
             rn = _normalize(raw)
 
-            # Level 1: exact (case-insensitive on the raw strings)
-            for i, cu in enumerate(uppers):
-                if ru == cu:
-                    return candidates[i].id
+            # Level 1: exact (case-insensitive on the raw strings) — O(1)
+            hit = upper_map.get(ru)
+            if hit is not None:
+                cache[raw] = hit
+                return hit
 
-            # Level 2: normalized exact (punctuation + whitespace stripped)
-            for i, cn in enumerate(norms):
-                if rn and rn == cn:
-                    return candidates[i].id
+            # Level 2: normalized exact (punctuation + whitespace stripped) — O(1)
+            if rn:
+                hit = norm_map.get(rn)
+                if hit is not None:
+                    cache[raw] = hit
+                    return hit
 
             # Level 3: substring containment on normalized form
-            for i, cn in enumerate(norms):
-                if rn and cn and (rn in cn or cn in rn):
-                    return candidates[i].id
+            if rn:
+                for i, cn in enumerate(norms):
+                    if cn and (rn in cn or cn in rn):
+                        cache[raw] = candidates[i].id
+                        return candidates[i].id
 
             # Level 4: first significant token
             raw_tokens = [t for t in rn.split() if len(t) >= 4]
@@ -250,13 +296,17 @@ class ImportService:
                 ft = raw_tokens[0]
                 for i, cn in enumerate(norms):
                     if ft in cn.split():
+                        cache[raw] = candidates[i].id
                         return candidates[i].id
 
             # Level 5: difflib close match (cutoff 0.6)
             hits = difflib.get_close_matches(rn, norms, n=1, cutoff=0.6)
             if hits:
-                return candidates[norms.index(hits[0])].id
+                resolved_id = candidates[norms.index(hits[0])].id
+                cache[raw] = resolved_id
+                return resolved_id
 
+            cache[raw] = None
             return None
 
         resolved: list[dict] = []
@@ -264,20 +314,25 @@ class ImportService:
             r = dict(row)
 
             if not r.get("product_id"):
-                r["product_id"] = match(r.get("product_name_raw"), products, prod_uppers, prod_norms)
+                r["product_id"] = match(
+                    r.get("product_name_raw"), products,
+                    prod_upper_map, prod_norm_map, prod_norms, prod_cache,
+                )
 
             if not r.get("medical_store_id"):
                 r["medical_store_id"] = match(
-                    r.get("customer_name_raw"), medical_stores, store_uppers, store_norms
+                    r.get("customer_name_raw"), medical_stores,
+                    store_upper_map, store_norm_map, store_norms, store_cache,
                 )
 
-            if job_mr_id is not None:
-                r["mr_id"] = str(job_mr_id)
-            elif not r.get("mr_id"):
-                r["mr_id"] = match(r.get("mr_name_raw"), mrs, mr_uppers, mr_norms)
+            # mr_id is intentionally NOT set here — it is resolved per-row
+            # afterwards via `_resolve_mrs_from_stores`.
 
             if not r.get("doctor_id"):
-                r["doctor_id"] = match(r.get("doctor_name_raw"), doctors, doc_uppers, doc_norms)
+                r["doctor_id"] = match(
+                    r.get("doctor_name_raw"), doctors,
+                    doc_upper_map, doc_norm_map, doc_norms, doc_cache,
+                )
 
             resolved.append(r)
 
@@ -300,13 +355,39 @@ class ImportService:
         """
         from app.modules.sales.service import resolve_manager_chain
 
-        validated = await validate_rows(db, confirmed_rows, job_mr_id=job.mr_id)
-        await self._hydrate_raw_names_from_db(db, validated)
+        validated = await validate_rows(db, confirmed_rows)
+        # `_hydrate_raw_names_from_db` is intentionally skipped here:
+        # the commit response only returns counts + skipped_rows, and the raw
+        # name fields are not written to `secondary_sales`. Re-fetching them
+        # was pure dead work.
         await self._enrich_derived_fields(db, validated)
 
         # Pre-compute manager-chain snapshot per unique mr_id to avoid repeating
         # the same recursive CTE for every row of the same MR.
         chain_cache: dict[uuid.UUID, dict[str, uuid.UUID | None]] = {}
+
+        # Pre-load every product referenced by valid rows in a single query —
+        # the previous code did `await db.get(Product, pid)` per row, causing
+        # N round-trips on the first encounter of each product_id.
+        product_ids_needed: set[uuid.UUID] = set()
+        for row in validated:
+            if row.get("skip") or not row.get("is_valid"):
+                continue
+            pid_str = row.get("product_id")
+            if pid_str:
+                try:
+                    product_ids_needed.add(uuid.UUID(str(pid_str)))
+                except (ValueError, AttributeError):
+                    pass
+
+        product_cache: dict[uuid.UUID, Product] = {}
+        if product_ids_needed:
+            rs = (
+                await db.execute(
+                    select(Product).where(Product.id.in_(product_ids_needed))
+                )
+            ).scalars().all()
+            product_cache = {p.id: p for p in rs}
 
         # Block whole commit if any non-skipped row still lacks product, store, or MR id
         bad_indexes = [
@@ -323,8 +404,10 @@ class ImportService:
                 + ("..." if len(bad_indexes) > 40 else "")
             )
 
-        committed = 0
         skipped_rows: list[dict] = []
+        # Accumulate insertable rows and emit a single bulk INSERT at the end —
+        # replaces 1 INSERT per row with 1 multi-row INSERT.
+        sale_values: list[dict] = []
 
         for idx, row in enumerate(validated):
             row_errors: list[str] = list(row.get("errors") or [])
@@ -369,7 +452,7 @@ class ImportService:
                 )
                 continue
 
-            product = await db.get(Product, product_id)
+            product = product_cache.get(product_id)
             if product is None:
                 _skip(f"product {product_id} not found")
                 continue
@@ -387,36 +470,39 @@ class ImportService:
                 chain = await resolve_manager_chain(db, mr_id)
                 chain_cache[mr_id] = chain
 
-            sale = SecondarySale(
-                mr_id=mr_id,
-                asm_id=chain["asm_id"],
-                rsm_id=chain["rsm_id"],
-                state_head_id=chain["state_head_id"],
-                product_id=product_id,
-                doctor_id=uuid.UUID(row["doctor_id"]) if row.get("doctor_id") else None,
-                medical_store_id=uuid.UUID(row["medical_store_id"]) if row.get("medical_store_id") else None,
-                division_id=division_id,
-                headquarter_id=hq_id,
-                location_id=location_id,
-                state_id=state_id,
-                sale_date=sale_date,
-                sale_qty=int(row["sale_qty"]),
-                free_qty=int(row.get("free_qty") or 0),
-                ptr=ptr,
-                pts=pts,
-                mrp=mrp,
-                reported_amount=row.get("reported_amount"),
-                bill_ref=row.get("bill_ref"),
-                batch=row.get("batch"),
-                pack=row.get("pack"),
-                special_price=None,
-                remarks=row.get("remarks"),
-                is_active=True,
-            )
-            db.add(sale)
-            committed += 1
+            sale_values.append({
+                "id": uuid.uuid4(),
+                "mr_id": mr_id,
+                "asm_id": chain["asm_id"],
+                "rsm_id": chain["rsm_id"],
+                "state_head_id": chain["state_head_id"],
+                "product_id": product_id,
+                "doctor_id": uuid.UUID(row["doctor_id"]) if row.get("doctor_id") else None,
+                "medical_store_id": uuid.UUID(row["medical_store_id"]) if row.get("medical_store_id") else None,
+                "division_id": division_id,
+                "headquarter_id": hq_id,
+                "location_id": location_id,
+                "state_id": state_id,
+                "sale_date": sale_date,
+                "sale_qty": int(row["sale_qty"]),
+                "free_qty": int(row.get("free_qty") or 0),
+                "ptr": ptr,
+                "pts": pts,
+                "mrp": mrp,
+                "reported_amount": row.get("reported_amount"),
+                "bill_ref": row.get("bill_ref"),
+                "batch": row.get("batch"),
+                "pack": row.get("pack"),
+                "special_price": None,
+                "remarks": row.get("remarks"),
+                "is_active": True,
+            })
 
-        await db.flush()
+        committed = len(sale_values)
+        if sale_values:
+            from sqlalchemy import insert as sa_insert
+            await db.execute(sa_insert(SecondarySale), sale_values)
+
         job.committed_count = committed
         if committed > 0:
             job.status = ImportJobStatus.committed
@@ -457,20 +543,6 @@ class ImportService:
                     candidates.append(EntityCandidate(id=str(r[0]), name=str(alt).strip()))
         return candidates
 
-    async def _get_all_mrs(
-        self,
-        db: AsyncSession,
-        job_mr_id: uuid.UUID | None = None,
-    ) -> list[EntityCandidate]:
-        from app.models.enums import UserRole
-        stmt = select(User.id, User.full_name).where(
-            User.role == UserRole.MR, User.is_active.is_(True)
-        )
-        if job_mr_id is not None:
-            stmt = stmt.where(User.id == job_mr_id)
-        rows = (await db.execute(stmt)).all()
-        return [EntityCandidate(id=str(r[0]), name=r[1]) for r in rows]
-
     async def _get_all_doctors(self, db: AsyncSession) -> list[EntityCandidate]:
         from app.models.doctor import Doctor
         rows = (
@@ -479,6 +551,125 @@ class ImportService:
             )
         ).all()
         return [EntityCandidate(id=str(r[0]), name=r[1]) for r in rows]
+
+    # ------------------------------------------------------------------
+    # MR resolution (medical store → doctor → active MR allocation)
+    # ------------------------------------------------------------------
+
+    async def _resolve_mrs_from_stores(
+        self,
+        db: AsyncSession,
+        rows: list[dict],
+    ) -> list[str]:
+        """
+        Populate `mr_id` on each row from its `medical_store_id` using:
+
+            doctor_medical_stores  ⨝  mr_doctor_allocations(is_active=true)
+
+        Resolution rules per store:
+          • exactly 1 distinct active MR across the store's doctors → set mr_id
+          • multiple distinct MRs → leave mr_id None, emit ambiguity warning
+          • no doctors / no active MR allocations → leave mr_id None, emit warning
+
+        All store lookups are done in a single batched JOIN — O(1) DB calls.
+        Returns a list of human-readable warnings to be surfaced in preview.
+        """
+
+        def _pid(val: object) -> uuid.UUID | None:
+            if val is None or val == "":
+                return None
+            try:
+                return uuid.UUID(str(val))
+            except (ValueError, AttributeError):
+                return None
+
+        store_ids: set[uuid.UUID] = set()
+        for row in rows:
+            if s := _pid(row.get("medical_store_id")):
+                store_ids.add(s)
+
+        if not store_ids:
+            return []
+
+        rs = (
+            await db.execute(
+                select(
+                    DoctorMedicalStore.medical_store_id,
+                    MrDoctorAllocation.mr_id,
+                )
+                .join(
+                    MrDoctorAllocation,
+                    MrDoctorAllocation.doctor_id == DoctorMedicalStore.doctor_id,
+                )
+                .where(
+                    DoctorMedicalStore.medical_store_id.in_(store_ids),
+                    MrDoctorAllocation.is_active.is_(True),
+                )
+                .distinct()
+            )
+        ).all()
+
+        store_to_mrs: dict[uuid.UUID, set[uuid.UUID]] = {}
+        for sid, mid in rs:
+            store_to_mrs.setdefault(sid, set()).add(mid)
+
+        store_to_resolved_mr: dict[uuid.UUID, uuid.UUID] = {}
+        ambiguous: set[uuid.UUID] = set()
+        unresolved: set[uuid.UUID] = set()
+
+        for sid in store_ids:
+            mrs = store_to_mrs.get(sid, set())
+            if len(mrs) == 1:
+                store_to_resolved_mr[sid] = next(iter(mrs))
+            elif len(mrs) > 1:
+                ambiguous.add(sid)
+            else:
+                unresolved.add(sid)
+
+        # Apply resolved mr_ids to rows. We override any pre-existing mr_id
+        # because this lookup is now the authoritative source.
+        for row in rows:
+            sid = _pid(row.get("medical_store_id"))
+            if sid is None:
+                row["mr_id"] = None
+                continue
+            mid = store_to_resolved_mr.get(sid)
+            row["mr_id"] = str(mid) if mid is not None else None
+
+        warnings: list[str] = []
+        if ambiguous:
+            names = await self._get_store_names(db, ambiguous)
+            warnings.append(
+                f"{len(ambiguous)} medical store(s) have doctors allocated to "
+                "multiple MRs — assign mr_id manually in preview: "
+                + ", ".join(names[:10])
+                + ("..." if len(names) > 10 else "")
+            )
+        if unresolved:
+            names = await self._get_store_names(db, unresolved)
+            warnings.append(
+                f"{len(unresolved)} medical store(s) have no doctors with active "
+                "MR allocations — assign mr_id manually in preview: "
+                + ", ".join(names[:10])
+                + ("..." if len(names) > 10 else "")
+            )
+        return warnings
+
+    async def _get_store_names(
+        self,
+        db: AsyncSession,
+        store_ids: set[uuid.UUID],
+    ) -> list[str]:
+        if not store_ids:
+            return []
+        rs = (
+            await db.execute(
+                select(MedicalStore.name)
+                .where(MedicalStore.id.in_(store_ids))
+                .order_by(MedicalStore.name)
+            )
+        ).all()
+        return [r[0] for r in rs if r[0]]
 
     async def _hydrate_raw_names_from_db(self, db: AsyncSession, rows: list[dict]) -> None:
         """

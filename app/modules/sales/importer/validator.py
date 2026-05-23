@@ -70,11 +70,15 @@ async def _exists(db: AsyncSession, model: type, pk: uuid.UUID) -> bool:
 async def validate_rows(
     db: AsyncSession,
     rows: list[dict],
-    job_mr_id: uuid.UUID | None,
 ) -> list[dict]:
     """
     Validate each row in-place, returning the annotated list.
     Adds: errors (list[str]), is_valid (bool), and coerced typed fields.
+
+    `mr_id` is expected to already be set on each row by
+    `ImportService._resolve_mrs_from_stores` (medical store → doctor → MR
+    allocation). Rows still lacking an mr_id at this point fail validation
+    and the user must assign one in preview.
     """
     # Collect unique IDs to batch-check existence
     product_ids: set[uuid.UUID] = set()
@@ -153,15 +157,18 @@ async def validate_rows(
             did = None
         row["doctor_id"] = str(did) if did else None
 
-        # --- mr_id (required — row-level or job-level) ---
+        # --- mr_id (required — must be auto-resolved from store→doctor→MR
+        #             allocation, or assigned manually in preview) ---
         row_mr = _parse_uuid(row.get("mr_id"))
-        effective_mr = row_mr or job_mr_id
-        if effective_mr is None:
-            errors.append("mr_id: no MR assigned — set mr_id at upload or assign per row")
-        elif row_mr is not None and row_mr not in valid_mrs:
+        if row_mr is None:
+            errors.append(
+                "mr_id: could not auto-resolve from medical store's doctor "
+                "allocations — assign manually in preview"
+            )
+        elif row_mr not in valid_mrs:
             errors.append(f"mr_id: {row_mr} not found in users table")
-            effective_mr = job_mr_id
-        row["mr_id"] = str(effective_mr) if effective_mr else None
+            row_mr = None
+        row["mr_id"] = str(row_mr) if row_mr else None
 
         row["errors"] = errors
         row["is_valid"] = len(errors) == 0

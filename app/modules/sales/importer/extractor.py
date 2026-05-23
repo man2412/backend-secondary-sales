@@ -36,7 +36,23 @@ class ExtractionResult:
 # PDF
 # ---------------------------------------------------------------------------
 
-def extract_pdf(content: bytes) -> ExtractionResult:
+def extract_pdf(content: bytes, *, detect_fos: bool = True) -> ExtractionResult:
+    """
+    PDF extraction. When `detect_fos` is False we skip opening the PDF entirely
+    (Gemini's Files API handles all parsing on its end), which avoids a second
+    pdfplumber pass on top of `probe_size`. Caller passes detect_fos=False when
+    `mr_id` is already known at upload time, since the FOS hint is unused in
+    that case.
+    """
+    if not detect_fos:
+        return ExtractionResult(
+            raw_text=None,
+            raw_bytes=content,
+            is_pdf=True,
+            detected_fos_name=None,
+            total_pages=None,
+        )
+
     import pdfplumber
 
     fos_name: str | None = None
@@ -178,10 +194,10 @@ def _detect_fos_in_lines(lines: list[str]) -> str | None:
 # Dispatcher + size introspection
 # ---------------------------------------------------------------------------
 
-def extract(filename: str, content: bytes) -> ExtractionResult:
+def extract(filename: str, content: bytes, *, detect_fos: bool = True) -> ExtractionResult:
     ext = Path(filename).suffix.lower()
     if ext == ".pdf":
-        return extract_pdf(content)
+        return extract_pdf(content, detect_fos=detect_fos)
     if ext == ".csv":
         return extract_csv(content)
     if ext == ".xlsx":

@@ -143,53 +143,56 @@ def _call_gemini(req: LLMParseRequest) -> tuple[dict, str]:
         else ""
     )
 
-    last_exc: Exception | None = None
-    for attempt in range(_GEMINI_MAX_ATTEMPTS):
-        file_obj = None
-        try:
-            if req.is_pdf and req.pdf_bytes:
-                file_obj = genai.upload_file(
-                    io.BytesIO(req.pdf_bytes),
-                    mime_type="application/pdf",
-                )
-                user_parts = [
-                    file_obj,
-                    f"Extract all sale rows from the attached distributor report PDF.{fos_hint}",
-                ]
-            else:
-                user_parts = [
-                    f"Extract all sale rows from the following distributor report.{fos_hint}\n\n"
-                    + (req.raw_text or ""),
-                ]
-
-            response = model.generate_content(
-                user_parts,
-                request_options={"timeout": _GEMINI_TIMEOUT_S},
+    # Upload PDF ONCE before the retry loop and reuse the same Files API handle
+    # across attempts — re-uploading 10MB+ on every transient failure was a
+    # major source of latency.
+    file_obj = None
+    try:
+        if req.is_pdf and req.pdf_bytes:
+            file_obj = genai.upload_file(
+                io.BytesIO(req.pdf_bytes),
+                mime_type="application/pdf",
             )
-            return json.loads(response.text), _GEMINI_MODEL
+            user_parts = [
+                file_obj,
+                f"Extract all sale rows from the attached distributor report PDF.{fos_hint}",
+            ]
+        else:
+            user_parts = [
+                f"Extract all sale rows from the following distributor report.{fos_hint}\n\n"
+                + (req.raw_text or ""),
+            ]
 
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt + 1 < _GEMINI_MAX_ATTEMPTS and _is_transient_gemini_error(exc):
-                delay = _GEMINI_BACKOFF_SECONDS[attempt]
-                logger.warning(
-                    "Gemini attempt %d/%d failed (%s), retrying in %ds",
-                    attempt + 1, _GEMINI_MAX_ATTEMPTS, type(exc).__name__, delay,
+        last_exc: Exception | None = None
+        for attempt in range(_GEMINI_MAX_ATTEMPTS):
+            try:
+                response = model.generate_content(
+                    user_parts,
+                    request_options={"timeout": _GEMINI_TIMEOUT_S},
                 )
-                time.sleep(delay)
-            else:
-                break
+                return json.loads(response.text), _GEMINI_MODEL
 
-        finally:
-            # Always delete the uploaded file, even on error, to avoid storage accumulation
-            if file_obj is not None:
-                try:
-                    file_obj.delete()
-                except Exception:
-                    pass
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt + 1 < _GEMINI_MAX_ATTEMPTS and _is_transient_gemini_error(exc):
+                    delay = _GEMINI_BACKOFF_SECONDS[attempt]
+                    logger.warning(
+                        "Gemini attempt %d/%d failed (%s), retrying in %ds",
+                        attempt + 1, _GEMINI_MAX_ATTEMPTS, type(exc).__name__, delay,
+                    )
+                    time.sleep(delay)
+                else:
+                    break
 
-    assert last_exc is not None
-    raise last_exc
+        assert last_exc is not None
+        raise last_exc
+
+    finally:
+        if file_obj is not None:
+            try:
+                file_obj.delete()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
