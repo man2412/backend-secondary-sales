@@ -12,7 +12,10 @@ Does NOT modify or reject rows — callers decide what to skip.
 """
 from __future__ import annotations
 
+import logging
+import time
 import uuid
+from collections import Counter
 from datetime import date, datetime
 from typing import Any
 
@@ -23,6 +26,8 @@ from app.models.doctor import Doctor
 from app.models.master import Product
 from app.models.stockist import MedicalStore
 from app.models.user import User
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_date(value: Any) -> date | None:
@@ -70,6 +75,8 @@ async def _exists(db: AsyncSession, model: type, pk: uuid.UUID) -> bool:
 async def validate_rows(
     db: AsyncSession,
     rows: list[dict],
+    *,
+    log_prefix: str = "",
 ) -> list[dict]:
     """
     Validate each row in-place, returning the annotated list.
@@ -80,6 +87,11 @@ async def validate_rows(
     allocation). Rows still lacking an mr_id at this point fail validation
     and the user must assign one in preview.
     """
+    t_total = time.perf_counter()
+    logger.info(
+        "%s validate_rows: starting rows=%d",
+        log_prefix, len(rows),
+    )
     # Collect unique IDs to batch-check existence
     product_ids: set[uuid.UUID] = set()
     store_ids: set[uuid.UUID] = set()
@@ -103,10 +115,21 @@ async def validate_rows(
         r = await db.execute(select(model.id).where(model.id.in_(ids)))  # type: ignore[attr-defined]
         return {row[0] for row in r.all()}
 
+    t_db = time.perf_counter()
     valid_products = await existing_ids(Product, product_ids)
     valid_stores = await existing_ids(MedicalStore, store_ids)
     valid_doctors = await existing_ids(Doctor, doctor_ids)
     valid_mrs = await existing_ids(User, mr_ids)
+    db_ms = (time.perf_counter() - t_db) * 1000
+    logger.info(
+        "%s validate_rows: existence-check distinct_products=%d distinct_stores=%d "
+        "distinct_doctors=%d distinct_mrs=%d valid_products=%d valid_stores=%d "
+        "valid_doctors=%d valid_mrs=%d db_ms=%.0f",
+        log_prefix,
+        len(product_ids), len(store_ids), len(doctor_ids), len(mr_ids),
+        len(valid_products), len(valid_stores), len(valid_doctors), len(valid_mrs),
+        db_ms,
+    )
 
     for row in rows:
         errors: list[str] = []
@@ -172,5 +195,19 @@ async def validate_rows(
 
         row["errors"] = errors
         row["is_valid"] = len(errors) == 0
+
+    valid_count = sum(1 for r in rows if r.get("is_valid"))
+    invalid_count = len(rows) - valid_count
+    err_hist: Counter[str] = Counter()
+    for r in rows:
+        for e in r.get("errors") or []:
+            # First two words give a stable category bucket: "product_id: ..." -> "product_id:"
+            err_hist[e.split(":", 1)[0] if ":" in e else e[:32]] += 1
+    logger.info(
+        "%s validate_rows: done valid=%d invalid=%d total_ms=%.0f errors_by_field=%s",
+        log_prefix, valid_count, invalid_count,
+        (time.perf_counter() - t_total) * 1000,
+        dict(err_hist) if err_hist else {},
+    )
 
     return rows

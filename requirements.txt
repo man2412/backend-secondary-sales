@@ -19,3 +19,4 @@ xlrd==2.0.1
 google-generativeai==0.8.3
 openai==1.52.0
 python-multipart==0.0.12
+mineru-open-sdk>=0.2.5

@@ -1,22 +1,31 @@
 """
-LLM-based parser — Approach G: Gemini Files API + no entity lists in prompt.
+LLM-based parser — Approach H: MinerU → markdown → Gemini text prompt.
 
-For PDFs  : uploads file via Gemini Files API, calls generateContent with the
-            file_uri, then immediately deletes the uploaded file.
-For tabular: sends minimal CSV text directly (no file upload needed).
+For PDFs (when MINERU_API_KEY is set):
+  1. MinerU cloud API converts the PDF to clean markdown (handles messy layouts,
+     tables, OCR). No Gemini Files API upload — PDF binary never leaves the thread.
+  2. The markdown is sent to Gemini as a plain text prompt (fast, cheap).
 
-The LLM extracts raw name strings only.  Entity→UUID resolution is done
+For PDFs (when MINERU_API_KEY is NOT set):
+  Falls back to Gemini Files API binary upload (original behaviour).
+
+For tabular (CSV / XLSX / XLS):
+  Already returned as text by extractor.py — sent directly as text prompt.
+  MinerU is not used for tabular files.
+
+The LLM extracts raw name strings only. Entity→UUID resolution is done
 entirely on the backend using difflib fuzzy matching (see import_service.py).
 
 Primary model : gemini-2.5-flash-lite
-Fallback model: gpt-4o-mini  (text-only; for PDFs it falls back to pdfplumber
-                               text extraction before sending to OpenAI)
+Fallback model: gpt-4o-mini
 """
 from __future__ import annotations
 
 import io
 import json
 import logging
+import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 
@@ -55,6 +64,8 @@ class LLMParseRequest:
     pdf_bytes: bytes | None = None     # PDF raw bytes → Files API
     is_pdf: bool = False
     detected_fos_name: str | None = None
+    # Carried purely for debug logging — has no effect on parsing.
+    log_prefix: str = ""
 
 
 @dataclass
@@ -100,7 +111,76 @@ Rules:
 
 
 # ---------------------------------------------------------------------------
-# Gemini  (primary) — Files API for PDFs, direct text for tabular
+# MinerU  — PDF → clean markdown (eliminates Gemini Files API upload)
+# ---------------------------------------------------------------------------
+
+_MINERU_TIMEOUT_S = 300
+
+
+def _call_mineru_extract(pdf_bytes: bytes, *, log_prefix: str = "") -> str:
+    """
+    Convert a PDF to clean markdown using the MinerU cloud API.
+
+    The SDK expects a file path, so the bytes are written to a temp file,
+    extracted, then the temp file is deleted. The call is blocking and is
+    always invoked inside asyncio.to_thread (via parse_with_llm).
+
+    Raises RuntimeError if MinerU returns empty content, triggering the
+    Gemini Files API fallback in parse_with_llm.
+    """
+    from mineru import MinerU  # type: ignore
+
+    logger.info(
+        "%s mineru: starting pdf_bytes=%d", log_prefix, len(pdf_bytes),
+    )
+    t0 = time.perf_counter()
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(pdf_bytes)
+            tmp_path = f.name
+
+        with MinerU(settings.MINERU_API_KEY) as client:
+            result = client.extract(
+                tmp_path,
+                language="en",
+                table=True,   # ensure tables are extracted properly
+                timeout=_MINERU_TIMEOUT_S,
+            )
+
+        markdown = (result.markdown or "").strip()
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        if not markdown:
+            logger.warning(
+                "%s mineru: empty markdown returned (elapsed_ms=%.0f, err_code=%r, error=%r)",
+                log_prefix, elapsed_ms,
+                getattr(result, "err_code", None),
+                getattr(result, "error", None),
+            )
+            raise RuntimeError("MinerU returned empty markdown for this PDF")
+        logger.info(
+            "%s mineru: ok markdown_chars=%d elapsed_ms=%.0f",
+            log_prefix, len(markdown), elapsed_ms,
+        )
+        return markdown
+
+    except Exception:
+        logger.exception(
+            "%s mineru: call failed after elapsed_ms=%.0f",
+            log_prefix, (time.perf_counter() - t0) * 1000,
+        )
+        raise
+
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Gemini  (primary) — text prompt (post-MinerU) or Files API fallback
 # ---------------------------------------------------------------------------
 
 _GEMINI_MODEL = "gemini-2.5-flash-lite"
@@ -126,6 +206,9 @@ def _is_transient_gemini_error(exc: BaseException) -> bool:
 def _call_gemini(req: LLMParseRequest) -> tuple[dict, str]:
     import google.generativeai as genai  # type: ignore
 
+    log_prefix = req.log_prefix
+    t_total = time.perf_counter()
+
     genai.configure(api_key=settings.GEMINI_API_KEY)
     model = genai.GenerativeModel(
         model_name=_GEMINI_MODEL,
@@ -143,15 +226,27 @@ def _call_gemini(req: LLMParseRequest) -> tuple[dict, str]:
         else ""
     )
 
+    input_mode = "pdf-files-api" if (req.is_pdf and req.pdf_bytes) else "text"
+    input_size = len(req.pdf_bytes or b"") if req.is_pdf else len(req.raw_text or "")
+    logger.info(
+        "%s gemini: starting model=%s input_mode=%s input_size=%d",
+        log_prefix, _GEMINI_MODEL, input_mode, input_size,
+    )
+
     # Upload PDF ONCE before the retry loop and reuse the same Files API handle
     # across attempts — re-uploading 10MB+ on every transient failure was a
     # major source of latency.
     file_obj = None
     try:
         if req.is_pdf and req.pdf_bytes:
+            t_upload = time.perf_counter()
             file_obj = genai.upload_file(
                 io.BytesIO(req.pdf_bytes),
                 mime_type="application/pdf",
+            )
+            logger.info(
+                "%s gemini: files-api upload ok elapsed_ms=%.0f",
+                log_prefix, (time.perf_counter() - t_upload) * 1000,
             )
             user_parts = [
                 file_obj,
@@ -165,23 +260,44 @@ def _call_gemini(req: LLMParseRequest) -> tuple[dict, str]:
 
         last_exc: Exception | None = None
         for attempt in range(_GEMINI_MAX_ATTEMPTS):
+            t_attempt = time.perf_counter()
             try:
                 response = model.generate_content(
                     user_parts,
                     request_options={"timeout": _GEMINI_TIMEOUT_S},
                 )
-                return json.loads(response.text), _GEMINI_MODEL
+                attempt_ms = (time.perf_counter() - t_attempt) * 1000
+                response_text = response.text or ""
+                parsed = json.loads(response_text)
+                rows_n = len(parsed.get("rows", [])) if isinstance(parsed, dict) else 0
+                logger.info(
+                    "%s gemini: attempt %d/%d ok response_chars=%d rows=%d "
+                    "attempt_ms=%.0f total_ms=%.0f",
+                    log_prefix, attempt + 1, _GEMINI_MAX_ATTEMPTS,
+                    len(response_text), rows_n, attempt_ms,
+                    (time.perf_counter() - t_total) * 1000,
+                )
+                return parsed, _GEMINI_MODEL
 
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
+                attempt_ms = (time.perf_counter() - t_attempt) * 1000
                 if attempt + 1 < _GEMINI_MAX_ATTEMPTS and _is_transient_gemini_error(exc):
                     delay = _GEMINI_BACKOFF_SECONDS[attempt]
                     logger.warning(
-                        "Gemini attempt %d/%d failed (%s), retrying in %ds",
-                        attempt + 1, _GEMINI_MAX_ATTEMPTS, type(exc).__name__, delay,
+                        "%s gemini: attempt %d/%d failed (%s: %s) "
+                        "attempt_ms=%.0f — retrying in %ds",
+                        log_prefix, attempt + 1, _GEMINI_MAX_ATTEMPTS,
+                        type(exc).__name__, exc, attempt_ms, delay,
                     )
                     time.sleep(delay)
                 else:
+                    logger.warning(
+                        "%s gemini: attempt %d/%d failed (%s: %s) "
+                        "attempt_ms=%.0f — no more retries",
+                        log_prefix, attempt + 1, _GEMINI_MAX_ATTEMPTS,
+                        type(exc).__name__, exc, attempt_ms,
+                    )
                     break
 
         assert last_exc is not None
@@ -192,29 +308,41 @@ def _call_gemini(req: LLMParseRequest) -> tuple[dict, str]:
             try:
                 file_obj.delete()
             except Exception:
-                pass
+                logger.warning(
+                    "%s gemini: failed to delete uploaded file (ignored)",
+                    log_prefix,
+                )
 
 
 # ---------------------------------------------------------------------------
 # OpenAI  (fallback) — text only; PDFs are pre-converted via pdfplumber
 # ---------------------------------------------------------------------------
 
-def _pdf_to_text(pdf_bytes: bytes) -> str:
+def _pdf_to_text(pdf_bytes: bytes, *, log_prefix: str = "") -> str:
     import pdfplumber
 
+    t0 = time.perf_counter()
     texts: list[str] = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
             t = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
             texts.append(t)
-    return "\n\n".join(texts)
+    out = "\n\n".join(texts)
+    logger.info(
+        "%s pdf_to_text: pages=%d chars=%d elapsed_ms=%.0f",
+        log_prefix, len(texts), len(out), (time.perf_counter() - t0) * 1000,
+    )
+    return out
 
 
 def _call_openai(req: LLMParseRequest) -> tuple[dict, str]:
     from openai import OpenAI  # type: ignore
 
+    log_prefix = req.log_prefix
+    t_total = time.perf_counter()
+
     if req.is_pdf and req.pdf_bytes:
-        text_content = _pdf_to_text(req.pdf_bytes)
+        text_content = _pdf_to_text(req.pdf_bytes, log_prefix=log_prefix)
     else:
         text_content = req.raw_text or ""
 
@@ -227,18 +355,37 @@ def _call_openai(req: LLMParseRequest) -> tuple[dict, str]:
         f"Extract all sale rows from the following distributor report.{fos_hint}\n\n{text_content}"
     )
 
-    client = OpenAI(api_key=settings.OPENAI_API_KEY)
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.0,
-        response_format={"type": "json_object"},
-        max_tokens=16384,
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
+    logger.info(
+        "%s openai: starting model=gpt-4o-mini input_chars=%d",
+        log_prefix, len(user_content),
     )
-    raw = json.loads(response.choices[0].message.content or "{}")
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            max_tokens=16384,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+        )
+    except Exception:
+        logger.exception(
+            "%s openai: call failed after elapsed_ms=%.0f",
+            log_prefix, (time.perf_counter() - t_total) * 1000,
+        )
+        raise
+
+    response_text = response.choices[0].message.content or "{}"
+    raw = json.loads(response_text)
+    rows_n = len(raw.get("rows", [])) if isinstance(raw, dict) else 0
+    logger.info(
+        "%s openai: ok response_chars=%d rows=%d elapsed_ms=%.0f",
+        log_prefix, len(response_text), rows_n,
+        (time.perf_counter() - t_total) * 1000,
+    )
     return raw, "gpt-4o-mini"
 
 
@@ -266,23 +413,70 @@ def _rows_to_dicts(raw_rows: list) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
-    """Upload file (PDFs) or send text (tabular) to LLM; return structured rows."""
+    """
+    Convert document to structured rows via LLM.
+
+    For PDFs with MINERU_API_KEY set:
+      - MinerU converts PDF → markdown (no Gemini Files API upload)
+      - Gemini / OpenAI receive markdown as a plain text prompt
+
+    For PDFs without MINERU_API_KEY:
+      - Falls back to Gemini Files API binary upload (original behaviour)
+
+    For tabular files (CSV/XLSX/XLS):
+      - Already text from extractor.py; MinerU is not called.
+    """
+    log_prefix = req.log_prefix
+    t_total = time.perf_counter()
+    logger.info(
+        "%s parse_with_llm: starting is_pdf=%s pdf_bytes=%d text_chars=%d "
+        "mineru_enabled=%s gemini_enabled=%s openai_enabled=%s",
+        log_prefix, req.is_pdf,
+        len(req.pdf_bytes or b""), len(req.raw_text or ""),
+        bool(settings.MINERU_API_KEY),
+        bool(settings.GEMINI_API_KEY),
+        bool(settings.OPENAI_API_KEY),
+    )
+
+    # --- Step 0: MinerU pre-extraction for PDFs ---
+    # Run this BEFORE any LLM call so both Gemini and the OpenAI fallback
+    # receive clean markdown text rather than a binary PDF.
+    effective_req = req
+    if req.is_pdf and req.pdf_bytes and settings.MINERU_API_KEY:
+        try:
+            markdown = _call_mineru_extract(req.pdf_bytes, log_prefix=log_prefix)
+            effective_req = LLMParseRequest(
+                raw_text=markdown, is_pdf=False, log_prefix=log_prefix,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "%s parse_with_llm: MinerU failed (%s: %s) — falling back to Gemini Files API",
+                log_prefix, type(exc).__name__, exc,
+            )
+            # effective_req stays as original req; Gemini Files API path used below
+
     raw: dict = {}
     model_used = ""
 
     _gemini_error: Exception | None = None
     if settings.GEMINI_API_KEY:
         try:
-            raw, model_used = _call_gemini(req)
+            raw, model_used = _call_gemini(effective_req)
         except Exception as exc:  # noqa: BLE001
             _gemini_error = exc
-            logger.warning("Gemini failed (%s: %s), trying OpenAI fallback", type(exc).__name__, exc)
+            logger.warning(
+                "%s parse_with_llm: Gemini failed (%s: %s) — trying OpenAI fallback",
+                log_prefix, type(exc).__name__, exc,
+            )
 
     if not model_used and settings.OPENAI_API_KEY:
         try:
-            raw, model_used = _call_openai(req)
+            raw, model_used = _call_openai(effective_req)
         except Exception as exc:
-            logger.error("OpenAI fallback also failed: %s", exc)
+            logger.error(
+                "%s parse_with_llm: OpenAI fallback also failed (%s: %s)",
+                log_prefix, type(exc).__name__, exc,
+            )
             raise RuntimeError("Both LLM providers failed. Check API keys and connectivity.") from exc
 
     if not model_used:
@@ -297,9 +491,16 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
     raw_rows = raw.get("rows", [])
     if not isinstance(raw_rows, list):
         raw_rows = []
+    rows = _rows_to_dicts(raw_rows)
+
+    logger.info(
+        "%s parse_with_llm: done model=%s raw_rows=%d kept_rows=%d total_ms=%.0f",
+        log_prefix, model_used, len(raw_rows), len(rows),
+        (time.perf_counter() - t_total) * 1000,
+    )
 
     return LLMParseResponse(
-        rows=_rows_to_dicts(raw_rows),
+        rows=rows,
         model_used=model_used,
         raw_response=raw,
     )

@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 _FOS_KEYWORDS = re.compile(
@@ -36,15 +40,22 @@ class ExtractionResult:
 # PDF
 # ---------------------------------------------------------------------------
 
-def extract_pdf(content: bytes, *, detect_fos: bool = True) -> ExtractionResult:
+def extract_pdf(
+    content: bytes,
+    *,
+    detect_fos: bool = True,
+    log_prefix: str = "",
+) -> ExtractionResult:
     """
     PDF extraction. When `detect_fos` is False we skip opening the PDF entirely
-    (Gemini's Files API handles all parsing on its end), which avoids a second
-    pdfplumber pass on top of `probe_size`. Caller passes detect_fos=False when
-    `mr_id` is already known at upload time, since the FOS hint is unused in
-    that case.
+    (downstream parsing handles binary directly), avoiding a redundant
+    pdfplumber pass on top of `probe_size`.
     """
     if not detect_fos:
+        logger.info(
+            "%s extract_pdf: skipping local parse (detect_fos=False) bytes=%d",
+            log_prefix, len(content),
+        )
         return ExtractionResult(
             raw_text=None,
             raw_bytes=content,
@@ -55,6 +66,7 @@ def extract_pdf(content: bytes, *, detect_fos: bool = True) -> ExtractionResult:
 
     import pdfplumber
 
+    t0 = time.perf_counter()
     fos_name: str | None = None
     with pdfplumber.open(io.BytesIO(content)) as pdf:
         total_pages = len(pdf.pages)
@@ -63,6 +75,12 @@ def extract_pdf(content: bytes, *, detect_fos: bool = True) -> ExtractionResult:
             t = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
             head_lines.extend(t.splitlines())
         fos_name = _detect_fos_in_lines(head_lines[:30])
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    logger.info(
+        "%s extract_pdf: pages=%d fos_detected=%s elapsed_ms=%.0f",
+        log_prefix, total_pages, bool(fos_name), elapsed_ms,
+    )
 
     return ExtractionResult(
         raw_text=None,
@@ -77,41 +95,62 @@ def extract_pdf(content: bytes, *, detect_fos: bool = True) -> ExtractionResult:
 # CSV
 # ---------------------------------------------------------------------------
 
-def extract_csv(content: bytes) -> ExtractionResult:
+def extract_csv(content: bytes, *, log_prefix: str = "") -> ExtractionResult:
+    t0 = time.perf_counter()
     decoded = content.decode("utf-8", errors="replace")
     all_rows = list(csv.reader(io.StringIO(decoded)))
-    return _tabular_to_result(all_rows)
+    res = _tabular_to_result(all_rows)
+    logger.info(
+        "%s extract_csv: rows_in=%d rows_out=%d fos_detected=%s elapsed_ms=%.0f",
+        log_prefix, len(all_rows), res.total_rows or 0,
+        bool(res.detected_fos_name), (time.perf_counter() - t0) * 1000,
+    )
+    return res
 
 
 # ---------------------------------------------------------------------------
 # XLSX
 # ---------------------------------------------------------------------------
 
-def extract_xlsx(content: bytes) -> ExtractionResult:
+def extract_xlsx(content: bytes, *, log_prefix: str = "") -> ExtractionResult:
     import openpyxl
 
+    t0 = time.perf_counter()
     wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     ws = wb.active or wb.worksheets[0]
     all_rows: list[list[str]] = []
     for row in ws.iter_rows(values_only=True):
         all_rows.append([str(c) if c is not None else "" for c in row])
     wb.close()
-    return _tabular_to_result(all_rows)
+    res = _tabular_to_result(all_rows)
+    logger.info(
+        "%s extract_xlsx: rows_in=%d rows_out=%d fos_detected=%s elapsed_ms=%.0f",
+        log_prefix, len(all_rows), res.total_rows or 0,
+        bool(res.detected_fos_name), (time.perf_counter() - t0) * 1000,
+    )
+    return res
 
 
 # ---------------------------------------------------------------------------
 # XLS
 # ---------------------------------------------------------------------------
 
-def extract_xls(content: bytes) -> ExtractionResult:
+def extract_xls(content: bytes, *, log_prefix: str = "") -> ExtractionResult:
     import xlrd
 
+    t0 = time.perf_counter()
     wb = xlrd.open_workbook(file_contents=content)
     ws = wb.sheet_by_index(0)
     all_rows: list[list[str]] = []
     for row_idx in range(ws.nrows):
         all_rows.append([str(ws.cell_value(row_idx, c)) for c in range(ws.ncols)])
-    return _tabular_to_result(all_rows)
+    res = _tabular_to_result(all_rows)
+    logger.info(
+        "%s extract_xls: rows_in=%d rows_out=%d fos_detected=%s elapsed_ms=%.0f",
+        log_prefix, len(all_rows), res.total_rows or 0,
+        bool(res.detected_fos_name), (time.perf_counter() - t0) * 1000,
+    )
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -194,16 +233,26 @@ def _detect_fos_in_lines(lines: list[str]) -> str | None:
 # Dispatcher + size introspection
 # ---------------------------------------------------------------------------
 
-def extract(filename: str, content: bytes, *, detect_fos: bool = True) -> ExtractionResult:
+def extract(
+    filename: str,
+    content: bytes,
+    *,
+    detect_fos: bool = True,
+    log_prefix: str = "",
+) -> ExtractionResult:
     ext = Path(filename).suffix.lower()
+    logger.info(
+        "%s extract: filename=%r ext=%s bytes=%d detect_fos=%s",
+        log_prefix, filename, ext, len(content), detect_fos,
+    )
     if ext == ".pdf":
-        return extract_pdf(content, detect_fos=detect_fos)
+        return extract_pdf(content, detect_fos=detect_fos, log_prefix=log_prefix)
     if ext == ".csv":
-        return extract_csv(content)
+        return extract_csv(content, log_prefix=log_prefix)
     if ext == ".xlsx":
-        return extract_xlsx(content)
+        return extract_xlsx(content, log_prefix=log_prefix)
     if ext == ".xls":
-        return extract_xls(content)
+        return extract_xls(content, log_prefix=log_prefix)
     raise ValueError(f"Unsupported file format: {ext!r}. Supported: pdf, csv, xlsx, xls")
 
 
@@ -213,25 +262,35 @@ def probe_size(filename: str, content: bytes) -> tuple[int | None, int | None]:
     Returns (page_count_or_None, row_count_or_None). Callers check len(content) separately.
     """
     ext = Path(filename).suffix.lower()
+    t0 = time.perf_counter()
+    pages: int | None = None
+    rows: int | None = None
     try:
         if ext == ".pdf":
             import pdfplumber
             with pdfplumber.open(io.BytesIO(content)) as pdf:
-                return len(pdf.pages), None
-        if ext == ".csv":
+                pages = len(pdf.pages)
+        elif ext == ".csv":
             decoded = content.decode("utf-8", errors="replace")
-            return None, sum(1 for _ in csv.reader(io.StringIO(decoded)))
-        if ext == ".xlsx":
+            rows = sum(1 for _ in csv.reader(io.StringIO(decoded)))
+        elif ext == ".xlsx":
             import openpyxl
             wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
             ws = wb.active or wb.worksheets[0]
-            n = ws.max_row or 0
+            rows = ws.max_row or 0
             wb.close()
-            return None, n
-        if ext == ".xls":
+        elif ext == ".xls":
             import xlrd
             wb = xlrd.open_workbook(file_contents=content)
-            return None, wb.sheet_by_index(0).nrows
-    except Exception:
-        pass
-    return None, None
+            rows = wb.sheet_by_index(0).nrows
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "probe_size: failed for %r (%s: %s) — returning None,None",
+            filename, type(exc).__name__, exc,
+        )
+        return None, None
+    logger.info(
+        "probe_size: filename=%r ext=%s bytes=%d pages=%s rows=%s elapsed_ms=%.0f",
+        filename, ext, len(content), pages, rows, (time.perf_counter() - t0) * 1000,
+    )
+    return pages, rows

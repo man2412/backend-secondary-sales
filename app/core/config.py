@@ -34,8 +34,9 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
     GEMINI_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
+    MINERU_API_KEY: str = ""
 
-    @field_validator("GEMINI_API_KEY", "OPENAI_API_KEY", mode="before")
+    @field_validator("GEMINI_API_KEY", "OPENAI_API_KEY", "MINERU_API_KEY", mode="before")
     @classmethod
     def _normalize_api_key(cls, v: object) -> str:
         if v is None:

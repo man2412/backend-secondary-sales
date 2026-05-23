@@ -1,3 +1,5 @@
+import logging
+import time
 from typing import Annotated
 from datetime import date
 from uuid import UUID
@@ -21,6 +23,8 @@ from app.modules.sales.schemas import (
     SecondarySaleUpdate,
 )
 from app.modules.sales.service import SalesService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/secondary-sales", tags=["secondary-sales"])
 
@@ -152,7 +156,16 @@ async def upload_import_job(
     content = await file.read()
     filename = file.filename or "upload"
 
+    logger.info(
+        "upload_import_job: received filename=%r bytes=%d uploaded_by=%s",
+        filename, len(content), str(current.id)[:8],
+    )
+
     if len(content) > MAX_FILE_SIZE_BYTES:
+        logger.warning(
+            "upload_import_job: REJECTED filename=%r — bytes=%d exceeds limit %d",
+            filename, len(content), MAX_FILE_SIZE_BYTES,
+        )
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"File exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB limit",
@@ -161,11 +174,19 @@ async def upload_import_job(
     from app.modules.sales.importer.extractor import probe_size
     pages, rows = probe_size(filename, content)
     if pages is not None and pages > MAX_PDF_PAGES:
+        logger.warning(
+            "upload_import_job: REJECTED filename=%r — pages=%d exceeds limit %d",
+            filename, pages, MAX_PDF_PAGES,
+        )
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"PDF has {pages} pages; max allowed is {MAX_PDF_PAGES}",
         )
     if rows is not None and rows > MAX_TABULAR_ROWS:
+        logger.warning(
+            "upload_import_job: REJECTED filename=%r — rows=%d exceeds limit %d",
+            filename, rows, MAX_TABULAR_ROWS,
+        )
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"Spreadsheet has {rows} rows; max allowed is {MAX_TABULAR_ROWS}",
@@ -179,6 +200,10 @@ async def upload_import_job(
             uploaded_by=current.id,
         )
     except ValueError as e:
+        logger.warning(
+            "upload_import_job: create_job rejected filename=%r — %s",
+            filename, e,
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
     # Commit the job row first, then process in background
@@ -186,6 +211,10 @@ async def upload_import_job(
     await db.refresh(job)
 
     background_tasks.add_task(_run_processing, job.id, content)
+    logger.info(
+        "upload_import_job: queued background processing job_id=%s",
+        str(job.id)[:8],
+    )
 
     return ok(
         data=ImportJobOut.model_validate(job).model_dump(mode="json"),
@@ -197,12 +226,34 @@ async def _run_processing(job_id: UUID, content: bytes) -> None:
     """Background task: open a fresh DB session and run the LLM pipeline."""
     from app.core.database import AsyncSessionLocal
 
-    async with AsyncSessionLocal() as db:
-        async with db.begin():
-            job = await db.get(ImportJob, job_id)
-            if job is None:
-                return
-            await ImportService().process_job(db, job, content)
+    short = str(job_id)[:8]
+    logger.info(
+        "[job=%s] _run_processing: background task entered bytes=%d",
+        short, len(content),
+    )
+    t0 = time.perf_counter()
+    try:
+        async with AsyncSessionLocal() as db:
+            async with db.begin():
+                job = await db.get(ImportJob, job_id)
+                if job is None:
+                    logger.warning(
+                        "[job=%s] _run_processing: job row not found in DB — aborting",
+                        short,
+                    )
+                    return
+                await ImportService().process_job(db, job, content)
+        logger.info(
+            "[job=%s] _run_processing: background task finished total_ms=%.0f",
+            short, (time.perf_counter() - t0) * 1000,
+        )
+    except Exception:
+        # process_job is supposed to swallow & persist its own failures, but
+        # log any escaped exception so the background task itself is debuggable.
+        logger.exception(
+            "[job=%s] _run_processing: unhandled exception after total_ms=%.0f",
+            short, (time.perf_counter() - t0) * 1000,
+        )
 
 
 @router.get(
@@ -224,7 +275,17 @@ async def preview_import_job(
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Import job not found")
     if job.uploaded_by != current.id:
+        logger.warning(
+            "preview_import_job: forbidden — user=%s tried to access job=%s owned by %s",
+            str(current.id)[:8], str(job_id)[:8], str(job.uploaded_by)[:8],
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your import job")
+    logger.debug(
+        "preview_import_job: job=%s status=%s rows=%s",
+        str(job_id)[:8],
+        getattr(job.status, "value", str(job.status)),
+        job.total_rows,
+    )
     payload = ImportJobPreviewOut.model_validate(job).model_dump(mode="json")
     return ok(data=payload)
 
@@ -244,12 +305,27 @@ async def commit_import_job(
     Send back the structured_rows from preview (possibly edited by the user).
     Rows with skip=true or is_valid=false are excluded automatically.
     """
+    short = str(job_id)[:8]
+    logger.info(
+        "commit_import_job: request job=%s confirmed_rows=%d user=%s",
+        short, len(body.confirmed_rows), str(current.id)[:8],
+    )
+    t0 = time.perf_counter()
+
     job = await db.get(ImportJob, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Import job not found")
     if job.uploaded_by != current.id:
+        logger.warning(
+            "commit_import_job: forbidden — user=%s job=%s owned by %s",
+            str(current.id)[:8], short, str(job.uploaded_by)[:8],
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your import job")
     if job.status not in (ImportJobStatus.ready, ImportJobStatus.committed):
+        logger.warning(
+            "commit_import_job: rejected — job=%s not ready (status=%s)",
+            short, job.status,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Job is not ready for commit (status={job.status})",
@@ -258,9 +334,18 @@ async def commit_import_job(
     try:
         summary = await ImportService().commit_job(db, job, body.confirmed_rows, current)
     except Exception as e:
+        logger.exception(
+            "commit_import_job: failed job=%s after %.0fms (%s: %s)",
+            short, (time.perf_counter() - t0) * 1000, type(e).__name__, e,
+        )
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
     await db.commit()
+    logger.info(
+        "commit_import_job: ok job=%s committed=%d skipped=%d total=%d total_ms=%.0f",
+        short, summary["committed"], summary["skipped"], summary["total"],
+        (time.perf_counter() - t0) * 1000,
+    )
 
     committed = summary["committed"]
     skipped = summary["skipped"]

@@ -13,7 +13,9 @@ import difflib
 import hashlib
 import logging
 import re
+import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 
@@ -33,6 +35,13 @@ from app.modules.sales.importer.llm_parser import LLMParseRequest, LLMParseRespo
 from app.modules.sales.importer.validator import validate_rows
 
 logger = logging.getLogger(__name__)
+
+
+def _job_log_prefix(job_id: uuid.UUID | None) -> str:
+    """Short, greppable prefix so all log lines for one job can be filtered."""
+    if job_id is None:
+        return "[job=?]"
+    return f"[job={str(job_id)[:8]}]"
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +89,11 @@ class ImportService:
         db.add(job)
         await db.flush()
         await db.refresh(job)
+        logger.info(
+            "%s create_job: created filename=%r ext=%s bytes=%d sha256=%s uploaded_by=%s",
+            _job_log_prefix(job.id), filename, ext, len(content),
+            file_hash[:12], str(uploaded_by)[:8],
+        )
         return job
 
     # ------------------------------------------------------------------
@@ -92,10 +106,28 @@ class ImportService:
         job: ImportJob,
         content: bytes,
     ) -> None:
+        prefix = _job_log_prefix(job.id)
+        t_total = time.perf_counter()
+        logger.info(
+            "%s process_job: starting filename=%r bytes=%d",
+            prefix, job.filename, len(content),
+        )
         try:
             await self._do_process(db, job, content)
+            logger.info(
+                "%s process_job: ok status=%s total_rows=%s warnings=%d total_ms=%.0f",
+                prefix,
+                getattr(job.status, "value", str(job.status)),
+                job.total_rows,
+                len(job.extraction_warnings or []),
+                (time.perf_counter() - t_total) * 1000,
+            )
         except Exception as exc:
-            logger.exception("ImportJob %s failed", job.id)
+            logger.exception(
+                "%s process_job: FAILED after total_ms=%.0f (%s: %s)",
+                prefix, (time.perf_counter() - t_total) * 1000,
+                type(exc).__name__, exc,
+            )
             from app.core.database import AsyncSessionLocal
             err_msg = str(exc)
             try:
@@ -105,14 +137,21 @@ class ImportService:
                         if fresh_job is not None:
                             fresh_job.status = ImportJobStatus.failed
                             fresh_job.error_message = err_msg
+                logger.info("%s process_job: failure persisted to DB", prefix)
             except Exception:
-                logger.exception("ImportJob %s: failed to persist failure status", job.id)
+                logger.exception(
+                    "%s process_job: failed to persist failure status (using current session as fallback)",
+                    prefix,
+                )
                 try:
                     job.status = ImportJobStatus.failed
                     job.error_message = err_msg
                     await db.flush()
                 except Exception:
-                    pass
+                    logger.exception(
+                        "%s process_job: fallback persistence ALSO failed",
+                        prefix,
+                    )
 
     async def _do_process(
         self,
@@ -120,15 +159,28 @@ class ImportService:
         job: ImportJob,
         content: bytes,
     ) -> None:
+        prefix = _job_log_prefix(job.id)
+
         # 1. Extract: PDFs → raw bytes; tabular → minimal CSV text.
         #    FOS-hint detection is no longer needed for resolution (mr_id is
         #    now derived from medical_store → doctor → MR allocation), so we
         #    skip the second PDF parse entirely. Tabular extraction picks up
         #    the FOS name for free as it scans rows; we keep that for display.
-        result: ExtractionResult = extract(job.filename, content, detect_fos=False)
+        t_step = time.perf_counter()
+        result: ExtractionResult = extract(
+            job.filename, content, detect_fos=False, log_prefix=prefix,
+        )
         job.raw_text = result.raw_text or ""
         if result.detected_fos_name:
             job.detected_fos_name = result.detected_fos_name
+        logger.info(
+            "%s step1 extract: is_pdf=%s text_chars=%d pdf_bytes=%d "
+            "total_pages=%s total_rows=%s elapsed_ms=%.0f",
+            prefix, result.is_pdf,
+            len(result.raw_text or ""), len(result.raw_bytes or b""),
+            result.total_pages, result.total_rows,
+            (time.perf_counter() - t_step) * 1000,
+        )
 
         # 2. Single LLM call — no entity lists, just file/text
         req = LLMParseRequest(
@@ -136,35 +188,81 @@ class ImportService:
             pdf_bytes=result.raw_bytes,
             is_pdf=result.is_pdf,
             detected_fos_name=None,
+            log_prefix=prefix,
         )
+        t_step = time.perf_counter()
         resp: LLMParseResponse = await asyncio.to_thread(parse_with_llm, req)
+        logger.info(
+            "%s step2 parse_with_llm: model=%s rows=%d elapsed_ms=%.0f",
+            prefix, resp.model_used, len(resp.rows),
+            (time.perf_counter() - t_step) * 1000,
+        )
 
         # 3. Load entity catalogues for backend fuzzy matching
         #    (MRs are resolved from store → doctor allocations, not by name)
+        t_step = time.perf_counter()
         products = await self._get_all_products(db)
         medical_stores = await self._get_all_stores(db)
         doctors = await self._get_all_doctors(db)
+        logger.info(
+            "%s step3 load_entities: products=%d stores(+aliases)=%d doctors=%d "
+            "elapsed_ms=%.0f",
+            prefix, len(products), len(medical_stores), len(doctors),
+            (time.perf_counter() - t_step) * 1000,
+        )
 
         # 4. Fuzzy resolve product / store / doctor names → UUIDs
+        t_step = time.perf_counter()
         resolved_rows = self._fuzzy_resolve_entities(
-            resp.rows, products, medical_stores, doctors
+            resp.rows, products, medical_stores, doctors,
+            log_prefix=prefix,
+        )
+        logger.info(
+            "%s step4 fuzzy_resolve: rows=%d elapsed_ms=%.0f",
+            prefix, len(resolved_rows),
+            (time.perf_counter() - t_step) * 1000,
         )
 
         # 5. Resolve mr_id from each row's medical_store_id via:
         #       doctor_medical_stores → mr_doctor_allocations (is_active)
         #    Returns warnings for stores with 0 or multiple distinct MRs.
-        mr_resolution_warnings = await self._resolve_mrs_from_stores(db, resolved_rows)
+        t_step = time.perf_counter()
+        mr_resolution_warnings = await self._resolve_mrs_from_stores(
+            db, resolved_rows, log_prefix=prefix,
+        )
+        logger.info(
+            "%s step5 resolve_mrs_from_stores: warnings=%d elapsed_ms=%.0f",
+            prefix, len(mr_resolution_warnings),
+            (time.perf_counter() - t_step) * 1000,
+        )
 
         # 6. Deterministic validation + type coercion
-        validated = await validate_rows(db, resolved_rows)
+        t_step = time.perf_counter()
+        validated = await validate_rows(db, resolved_rows, log_prefix=prefix)
+        logger.info(
+            "%s step6 validate: rows=%d elapsed_ms=%.0f",
+            prefix, len(validated),
+            (time.perf_counter() - t_step) * 1000,
+        )
 
         # 6b. Display names follow DB for resolved ids; null ids → null names (user fills in UI)
-        await self._hydrate_raw_names_from_db(db, validated)
+        t_step = time.perf_counter()
+        await self._hydrate_raw_names_from_db(db, validated, log_prefix=prefix)
+        logger.info(
+            "%s step6b hydrate_raw_names: elapsed_ms=%.0f",
+            prefix, (time.perf_counter() - t_step) * 1000,
+        )
 
         # 6c. Auto-populate derived fields (division/location/hq/state + doctor auto-fill)
-        await self._enrich_derived_fields(db, validated)
+        t_step = time.perf_counter()
+        await self._enrich_derived_fields(db, validated, log_prefix=prefix)
+        logger.info(
+            "%s step6c enrich_derived: elapsed_ms=%.0f",
+            prefix, (time.perf_counter() - t_step) * 1000,
+        )
 
         # 7. Up-front allocation warning so user sees it at preview, not after commit
+        t_step = time.perf_counter()
         mr_ids_in_rows: set[uuid.UUID] = set()
         for r in validated:
             if r.get("mr_id"):
@@ -180,8 +278,16 @@ class ImportService:
                 "The following MR(s) have no active location allocations — "
                 "commits for their rows will be skipped: " + ", ".join(names)
             )
+        logger.info(
+            "%s step7 alloc_check: distinct_mrs_in_rows=%d mrs_without_alloc=%d "
+            "elapsed_ms=%.0f",
+            prefix, len(mr_ids_in_rows), len(mrs_without_alloc),
+            (time.perf_counter() - t_step) * 1000,
+        )
 
         # 8. Persist
+        valid_n = sum(1 for r in validated if r.get("is_valid"))
+        invalid_n = len(validated) - valid_n
         job.structured_rows = validated
         job.total_rows = len(validated)
         job.model_used = resp.model_used or None
@@ -190,6 +296,11 @@ class ImportService:
         job.extraction_warnings = warnings if warnings else None
         job.status = ImportJobStatus.partial if warnings else ImportJobStatus.ready
         await db.flush()
+        logger.info(
+            "%s step8 persist: status=%s total_rows=%d valid=%d invalid=%d warnings=%d",
+            prefix, job.status.value if hasattr(job.status, "value") else str(job.status),
+            len(validated), valid_n, invalid_n, len(warnings),
+        )
 
     # ------------------------------------------------------------------
     # Fuzzy entity resolution
@@ -201,6 +312,8 @@ class ImportService:
         products: list[EntityCandidate],
         medical_stores: list[EntityCandidate],
         doctors: list[EntityCandidate],
+        *,
+        log_prefix: str = "",
     ) -> list[dict]:
         """
         Five-level fuzzy match raw LLM-extracted names to entity UUIDs:
@@ -310,31 +423,58 @@ class ImportService:
             return None
 
         resolved: list[dict] = []
+        # Counters for visibility into how rows fared.
+        prod_seen = prod_resolved = 0
+        store_seen = store_resolved = 0
+        doc_seen = doc_resolved = 0
+
         for row in rows:
             r = dict(row)
 
             if not r.get("product_id"):
+                if r.get("product_name_raw"):
+                    prod_seen += 1
                 r["product_id"] = match(
                     r.get("product_name_raw"), products,
                     prod_upper_map, prod_norm_map, prod_norms, prod_cache,
                 )
+                if r["product_id"]:
+                    prod_resolved += 1
 
             if not r.get("medical_store_id"):
+                if r.get("customer_name_raw"):
+                    store_seen += 1
                 r["medical_store_id"] = match(
                     r.get("customer_name_raw"), medical_stores,
                     store_upper_map, store_norm_map, store_norms, store_cache,
                 )
+                if r["medical_store_id"]:
+                    store_resolved += 1
 
             # mr_id is intentionally NOT set here — it is resolved per-row
             # afterwards via `_resolve_mrs_from_stores`.
 
             if not r.get("doctor_id"):
+                if r.get("doctor_name_raw"):
+                    doc_seen += 1
                 r["doctor_id"] = match(
                     r.get("doctor_name_raw"), doctors,
                     doc_upper_map, doc_norm_map, doc_norms, doc_cache,
                 )
+                if r["doctor_id"]:
+                    doc_resolved += 1
 
             resolved.append(r)
+
+        logger.info(
+            "%s fuzzy_resolve: product %d/%d, store %d/%d, doctor %d/%d "
+            "(unique_raw_names: prod=%d store=%d doc=%d)",
+            log_prefix,
+            prod_resolved, prod_seen,
+            store_resolved, store_seen,
+            doc_resolved, doc_seen,
+            len(prod_cache), len(store_cache), len(doc_cache),
+        )
 
         return resolved
 
@@ -355,12 +495,29 @@ class ImportService:
         """
         from app.modules.sales.service import resolve_manager_chain
 
-        validated = await validate_rows(db, confirmed_rows)
+        prefix = _job_log_prefix(job.id)
+        t_total = time.perf_counter()
+        logger.info(
+            "%s commit_job: starting confirmed_rows=%d committed_by=%s",
+            prefix, len(confirmed_rows), str(committed_by.id)[:8],
+        )
+
+        t_step = time.perf_counter()
+        validated = await validate_rows(db, confirmed_rows, log_prefix=prefix)
+        logger.info(
+            "%s commit_job: re-validate elapsed_ms=%.0f",
+            prefix, (time.perf_counter() - t_step) * 1000,
+        )
         # `_hydrate_raw_names_from_db` is intentionally skipped here:
         # the commit response only returns counts + skipped_rows, and the raw
         # name fields are not written to `secondary_sales`. Re-fetching them
         # was pure dead work.
-        await self._enrich_derived_fields(db, validated)
+        t_step = time.perf_counter()
+        await self._enrich_derived_fields(db, validated, log_prefix=prefix)
+        logger.info(
+            "%s commit_job: enrich elapsed_ms=%.0f",
+            prefix, (time.perf_counter() - t_step) * 1000,
+        )
 
         # Pre-compute manager-chain snapshot per unique mr_id to avoid repeating
         # the same recursive CTE for every row of the same MR.
@@ -380,6 +537,7 @@ class ImportService:
                 except (ValueError, AttributeError):
                     pass
 
+        t_step = time.perf_counter()
         product_cache: dict[uuid.UUID, Product] = {}
         if product_ids_needed:
             rs = (
@@ -388,6 +546,11 @@ class ImportService:
                 )
             ).scalars().all()
             product_cache = {p.id: p for p in rs}
+        logger.info(
+            "%s commit_job: preload products distinct=%d cached=%d elapsed_ms=%.0f",
+            prefix, len(product_ids_needed), len(product_cache),
+            (time.perf_counter() - t_step) * 1000,
+        )
 
         # Block whole commit if any non-skipped row still lacks product, store, or MR id
         bad_indexes = [
@@ -397,6 +560,10 @@ class ImportService:
             and (not row.get("product_id") or not row.get("medical_store_id") or not row.get("mr_id"))
         ]
         if bad_indexes:
+            logger.warning(
+                "%s commit_job: blocked — %d row(s) missing required ids (first few: %s)",
+                prefix, len(bad_indexes), bad_indexes[:10],
+            )
             raise ValueError(
                 "Cannot commit: some rows are missing required product_id, medical_store_id, or mr_id. "
                 "Assign them in preview (skipped rows are ignored). "
@@ -408,12 +575,15 @@ class ImportService:
         # Accumulate insertable rows and emit a single bulk INSERT at the end —
         # replaces 1 INSERT per row with 1 multi-row INSERT.
         sale_values: list[dict] = []
+        skip_reason_hist: Counter[str] = Counter()
+        t_loop = time.perf_counter()
 
         for idx, row in enumerate(validated):
             row_errors: list[str] = list(row.get("errors") or [])
 
             def _skip(reason: str) -> None:
                 row_errors.append(reason)
+                skip_reason_hist[reason.split(" — ")[0][:48]] += 1
                 skipped_rows.append({
                     "row_index": idx,
                     "product_name_raw": row.get("product_name_raw"),
@@ -425,6 +595,7 @@ class ImportService:
                 _skip("row marked skip=true")
                 continue
             if not row.get("is_valid"):
+                skip_reason_hist["validation failure"] += 1
                 skipped_rows.append({
                     "row_index": idx,
                     "product_name_raw": row.get("product_name_raw"),
@@ -498,15 +669,44 @@ class ImportService:
                 "is_active": True,
             })
 
+        loop_ms = (time.perf_counter() - t_loop) * 1000
+        logger.info(
+            "%s commit_job: row-loop done sale_values=%d skipped=%d "
+            "manager_chains_resolved=%d elapsed_ms=%.0f skip_reasons=%s",
+            prefix, len(sale_values), len(skipped_rows),
+            len(chain_cache), loop_ms,
+            dict(skip_reason_hist) if skip_reason_hist else {},
+        )
+
         committed = len(sale_values)
         if sale_values:
             from sqlalchemy import insert as sa_insert
-            await db.execute(sa_insert(SecondarySale), sale_values)
+            t_insert = time.perf_counter()
+            try:
+                await db.execute(sa_insert(SecondarySale), sale_values)
+            except Exception:
+                logger.exception(
+                    "%s commit_job: bulk INSERT failed (rows=%d)",
+                    prefix, len(sale_values),
+                )
+                raise
+            logger.info(
+                "%s commit_job: bulk INSERT ok rows=%d elapsed_ms=%.0f",
+                prefix, committed, (time.perf_counter() - t_insert) * 1000,
+            )
 
         job.committed_count = committed
         if committed > 0:
             job.status = ImportJobStatus.committed
         await db.flush()
+
+        logger.info(
+            "%s commit_job: done status=%s committed=%d skipped=%d total=%d total_ms=%.0f",
+            prefix,
+            job.status.value if hasattr(job.status, "value") else str(job.status),
+            committed, len(skipped_rows), len(validated),
+            (time.perf_counter() - t_total) * 1000,
+        )
 
         return {
             "committed": committed,
@@ -521,13 +721,19 @@ class ImportService:
     # ------------------------------------------------------------------
 
     async def _get_all_products(self, db: AsyncSession) -> list[EntityCandidate]:
+        t0 = time.perf_counter()
         rows = (
             await db.execute(select(Product.id, Product.name).where(Product.is_active.is_(True)))
         ).all()
+        logger.debug(
+            "load_entities products: %d rows in %.0fms",
+            len(rows), (time.perf_counter() - t0) * 1000,
+        )
         return [EntityCandidate(id=str(r[0]), name=r[1]) for r in rows]
 
     async def _get_all_stores(self, db: AsyncSession) -> list[EntityCandidate]:
         from app.models.stockist import MedicalStore
+        t0 = time.perf_counter()
         rows = (
             await db.execute(
                 select(MedicalStore.id, MedicalStore.name, MedicalStore.alternate_names).where(
@@ -541,15 +747,24 @@ class ImportService:
             for alt in r[2] or []:
                 if alt and str(alt).strip():
                     candidates.append(EntityCandidate(id=str(r[0]), name=str(alt).strip()))
+        logger.debug(
+            "load_entities stores: %d distinct, %d incl. aliases in %.0fms",
+            len(rows), len(candidates), (time.perf_counter() - t0) * 1000,
+        )
         return candidates
 
     async def _get_all_doctors(self, db: AsyncSession) -> list[EntityCandidate]:
         from app.models.doctor import Doctor
+        t0 = time.perf_counter()
         rows = (
             await db.execute(
                 select(Doctor.id, Doctor.full_name).where(Doctor.is_active.is_(True))
             )
         ).all()
+        logger.debug(
+            "load_entities doctors: %d rows in %.0fms",
+            len(rows), (time.perf_counter() - t0) * 1000,
+        )
         return [EntityCandidate(id=str(r[0]), name=r[1]) for r in rows]
 
     # ------------------------------------------------------------------
@@ -560,6 +775,8 @@ class ImportService:
         self,
         db: AsyncSession,
         rows: list[dict],
+        *,
+        log_prefix: str = "",
     ) -> list[str]:
         """
         Populate `mr_id` on each row from its `medical_store_id` using:
@@ -589,8 +806,13 @@ class ImportService:
                 store_ids.add(s)
 
         if not store_ids:
+            logger.info(
+                "%s resolve_mrs_from_stores: no medical_store_ids on any row — skipping",
+                log_prefix,
+            )
             return []
 
+        t_db = time.perf_counter()
         rs = (
             await db.execute(
                 select(
@@ -608,6 +830,11 @@ class ImportService:
                 .distinct()
             )
         ).all()
+        logger.info(
+            "%s resolve_mrs_from_stores: store_ids=%d join_rows=%d db_ms=%.0f",
+            log_prefix, len(store_ids), len(rs),
+            (time.perf_counter() - t_db) * 1000,
+        )
 
         store_to_mrs: dict[uuid.UUID, set[uuid.UUID]] = {}
         for sid, mid in rs:
@@ -635,6 +862,14 @@ class ImportService:
                 continue
             mid = store_to_resolved_mr.get(sid)
             row["mr_id"] = str(mid) if mid is not None else None
+
+        rows_with_mr = sum(1 for r in rows if r.get("mr_id"))
+        logger.info(
+            "%s resolve_mrs_from_stores: stores resolved_uniquely=%d ambiguous=%d "
+            "unresolved=%d → rows_with_mr_id=%d/%d",
+            log_prefix, len(store_to_resolved_mr), len(ambiguous), len(unresolved),
+            rows_with_mr, len(rows),
+        )
 
         warnings: list[str] = []
         if ambiguous:
@@ -671,7 +906,13 @@ class ImportService:
         ).all()
         return [r[0] for r in rs if r[0]]
 
-    async def _hydrate_raw_names_from_db(self, db: AsyncSession, rows: list[dict]) -> None:
+    async def _hydrate_raw_names_from_db(
+        self,
+        db: AsyncSession,
+        rows: list[dict],
+        *,
+        log_prefix: str = "",
+    ) -> None:
         """
         Preview / commit: show canonical names from DB for any resolved ids.
         If product_id or medical_store_id is missing, clear the corresponding raw name
@@ -695,6 +936,7 @@ class ImportService:
             if s := _pid(row.get("medical_store_id")):
                 store_ids.add(s)
 
+        t_db = time.perf_counter()
         prod_map: dict[uuid.UUID, str] = {}
         if product_ids:
             rs = (
@@ -710,6 +952,11 @@ class ImportService:
                 )
             ).all()
             store_map = {r[0]: (r[1] or "").strip() for r in rs}
+        logger.debug(
+            "%s hydrate_raw_names: distinct_products=%d distinct_stores=%d db_ms=%.0f",
+            log_prefix, len(product_ids), len(store_ids),
+            (time.perf_counter() - t_db) * 1000,
+        )
 
         for row in rows:
             p = _pid(row.get("product_id"))
@@ -728,7 +975,13 @@ class ImportService:
     # Auto-populate derived fields (division/location/HQ/state + doctor)
     # ------------------------------------------------------------------
 
-    async def _enrich_derived_fields(self, db: AsyncSession, rows: list[dict]) -> None:
+    async def _enrich_derived_fields(
+        self,
+        db: AsyncSession,
+        rows: list[dict],
+        *,
+        log_prefix: str = "",
+    ) -> None:
         """
         Auto-populate derived fields on each row using batch DB lookups:
 
@@ -816,6 +1069,7 @@ class ImportService:
                     pair_to_doctor[(mr, st)] = next(iter(common))
 
         # Apply auto-filled doctor_ids and add them to the doctor_id batch lookup.
+        autofilled_doctor_count = 0
         for row in rows:
             if _pid(row.get("doctor_id")) is not None:
                 continue
@@ -827,6 +1081,7 @@ class ImportService:
             if did is not None:
                 row["doctor_id"] = str(did)
                 doctor_ids.add(did)
+                autofilled_doctor_count += 1
 
         # ---------- Step B: batch fetch products / stores / doctors ----------
         product_map: dict[uuid.UUID, uuid.UUID] = {}  # product_id -> division_id
@@ -890,6 +1145,7 @@ class ImportService:
             hq_map = {r[0]: r[1] for r in rs}
 
         # ---------- Step E: per-row derivation ----------
+        div_filled = loc_filled = hq_filled = state_filled = 0
         for row in rows:
             pid = _pid(row.get("product_id"))
             sid = _pid(row.get("medical_store_id"))
@@ -910,6 +1166,23 @@ class ImportService:
             row["location_id"] = str(location_id) if location_id else None
             row["headquarter_id"] = str(hq_id) if hq_id else None
             row["state_id"] = str(state_id) if state_id else None
+
+            if division_id:
+                div_filled += 1
+            if location_id:
+                loc_filled += 1
+            if hq_id:
+                hq_filled += 1
+            if state_id:
+                state_filled += 1
+
+        n = len(rows)
+        logger.info(
+            "%s enrich_derived: rows=%d auto_doctor=%d division=%d/%d location=%d/%d "
+            "hq=%d/%d state=%d/%d",
+            log_prefix, n, autofilled_doctor_count,
+            div_filled, n, loc_filled, n, hq_filled, n, state_filled, n,
+        )
 
     # ------------------------------------------------------------------
     # Allocation helpers
