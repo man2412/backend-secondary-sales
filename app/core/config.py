@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     MINERU_API_KEY: str = ""
+    # Logging level for the app's own loggers (DEBUG | INFO | WARNING | ERROR).
+    # Set to DEBUG when investigating slow imports / failures.
+    LOG_LEVEL: str = "INFO"
 
     @field_validator("GEMINI_API_KEY", "OPENAI_API_KEY", "MINERU_API_KEY", mode="before")
     @classmethod

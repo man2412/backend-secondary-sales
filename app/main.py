@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -6,6 +7,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.redis import close_redis
+
+
+# ---------------------------------------------------------------------------
+# Logging configuration
+# ---------------------------------------------------------------------------
+# Configure the root logger early (before app/router import side effects log
+# anything). uvicorn runs with its own access/error loggers — those are left
+# alone; this only configures our own `app.*` loggers.
+def _configure_logging() -> None:
+    level = getattr(logging, (settings.LOG_LEVEL or "INFO").upper(), logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s %(levelname)-7s %(name)s :: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    app_logger = logging.getLogger("app")
+    app_logger.setLevel(level)
+    # Clear any pre-existing handlers (e.g. uvicorn --reload re-imports this
+    # module) so we don't accumulate duplicates.
+    app_logger.handlers.clear()
+    app_logger.addHandler(handler)
+    app_logger.propagate = False
+
+
+_configure_logging()
 from app.modules.allocations.router import router as allocations_router
 from app.modules.auth.router import router as auth_router
 from app.modules.doctors.router import router as doctors_router
