@@ -167,6 +167,14 @@ def _call_mineru_extract(pdf_bytes: bytes, *, log_prefix: str = "") -> str:
             "%s mineru: ok markdown_chars=%d elapsed_ms=%.0f",
             log_prefix, len(markdown), elapsed_ms,
         )
+        # Log the first 40 lines so we can diagnose the exact markdown
+        # structure and verify the chunking splitter will work correctly.
+        first_lines = markdown.splitlines()[:40]
+        logger.info(
+            "%s mineru: markdown_preview (first %d lines):\n%s",
+            log_prefix, len(first_lines),
+            "\n".join(f"  {i:3}: {ln}" for i, ln in enumerate(first_lines)),
+        )
         return markdown
 
     except Exception:
@@ -615,8 +623,15 @@ def _call_gemini_chunked(
         log_prefix, n, [len(c) for c in chunks],
     )
     t_total = time.perf_counter()
+    # Stagger chunk submissions by 2 seconds each to avoid simultaneous
+    # bursts that trigger Gemini 503 rate-limit / overload responses.
+    _CHUNK_STAGGER_S = 2
     with ThreadPoolExecutor(max_workers=n) as ex:
-        futures = [ex.submit(_do_one, i, c) for i, c in enumerate(chunks)]
+        futures = []
+        for i, c in enumerate(chunks):
+            if i > 0:
+                time.sleep(_CHUNK_STAGGER_S)
+            futures.append(ex.submit(_do_one, i, c))
         results = [f.result() for f in futures]
 
     # Stable order (chunk 1 rows come before chunk 2 rows in the combined list).
