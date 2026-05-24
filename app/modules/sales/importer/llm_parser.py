@@ -863,6 +863,11 @@ def _is_junk_row(d: dict) -> bool:
 def _rows_to_dicts(raw_rows: list) -> list[dict]:
     result: list[dict] = []
     junk_dropped = 0
+    junk_samples: list[dict] = []
+    logger.info(
+        "_rows_to_dicts v2: starting raw_rows=%d (junk-filter active)",
+        len(raw_rows),
+    )
     for row in raw_rows:
         d: dict | None = None
         if isinstance(row, dict):
@@ -878,14 +883,19 @@ def _rows_to_dicts(raw_rows: list) -> list[dict]:
         d["free_qty"] = _normalize_qty(d.get("free_qty"))
         if _is_junk_row(d):
             junk_dropped += 1
+            if len(junk_samples) < 3:
+                junk_samples.append({
+                    "product": d.get("product_name_raw"),
+                    "date": d.get("sale_date"),
+                    "qty": d.get("sale_qty"),
+                })
             continue
         result.append(d)
-    if junk_dropped:
-        logger.info(
-            "_rows_to_dicts: dropped %d junk row(s) (no product / no date / no qty) "
-            "from %d raw → %d kept",
-            junk_dropped, len(raw_rows), len(result),
-        )
+    logger.info(
+        "_rows_to_dicts v2: dropped %d junk row(s) from %d raw → %d kept "
+        "(samples=%s)",
+        junk_dropped, len(raw_rows), len(result), junk_samples,
+    )
     return result
 
 
