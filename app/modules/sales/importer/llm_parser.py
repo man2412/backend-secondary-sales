@@ -301,6 +301,10 @@ def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
                 continue
         k += 1
 
+    logger.info(
+        "split: strategy2 found %d page-table boundaries (need >= %d)",
+        len(table_start_idxs), n,
+    )
     # Need at least n distinct page-tables to split into n chunks.
     if len(table_start_idxs) >= n:
         # Candidate boundaries: every table-start after the very first one.
@@ -322,7 +326,41 @@ def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
             if len(chunks) >= 2:
                 return chunks
 
-    # --- Strategy 3: refuse to chunk ---
+    # --- Strategy 3: line-count split at safe line boundaries ---
+    #
+    # Both structure-aware strategies failed (no headings, no page-table pattern).
+    # Fall back to splitting the document into n roughly equal parts by character
+    # count, but always cut at a newline boundary — never mid-row. This is safe
+    # even for markdown tables because each row is self-contained on its own line.
+    #
+    # Accuracy risk is low: MinerU repeats context rows (customer name) at page
+    # breaks, so the LLM in each chunk has enough context even without seeing the
+    # full document. A small overlap is NOT needed here because MinerU's output is
+    # row-oriented (one sale per line).
+    total_chars = sum(len(ln) for ln in lines)
+    target = total_chars // n
+    chunks_fb: list[str] = []
+    buf: list[str] = []
+    buf_chars = 0
+    part = 0
+    for ln in lines:
+        buf.append(ln)
+        buf_chars += len(ln)
+        if buf_chars >= target and part < n - 1:
+            chunks_fb.append("".join(buf))
+            buf = []
+            buf_chars = 0
+            part += 1
+    if buf:
+        chunks_fb.append("".join(buf))
+    chunks_fb = [c for c in chunks_fb if c.strip()]
+    if len(chunks_fb) >= 2:
+        logger.info(
+            "split: strategy3 line-count produced %d chunks from %d chars",
+            len(chunks_fb), total_chars,
+        )
+        return chunks_fb
+
     return [text]
 
 
@@ -831,6 +869,7 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
     model_used = ""
     chunk_warnings: list[str] = []
     pre_dedupe_count = 0
+    actual_chunks_used = 1
 
     _gemini_error: Exception | None = None
     if settings.GEMINI_API_KEY:
@@ -862,6 +901,7 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
                     if not isinstance(raw_rows, list):
                         raw_rows = []
                 else:
+                    actual_chunks_used = len(chunks)
                     raw_rows, chunk_warnings = _call_gemini_chunked(
                         chunks,
                         detected_fos_name=effective_req.detected_fos_name,
@@ -913,9 +953,9 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
     rows = _rows_to_dicts(raw_rows)
 
     logger.info(
-        "%s parse_with_llm: done model=%s chunked=%s raw_rows=%d "
+        "%s parse_with_llm: done model=%s chunks_used=%d raw_rows=%d "
         "(pre_dedupe=%d) kept_rows=%d warnings=%d total_ms=%.0f",
-        log_prefix, model_used, can_chunk,
+        log_prefix, model_used, actual_chunks_used,
         len(raw_rows), pre_dedupe_count or len(raw_rows),
         len(rows), len(chunk_warnings),
         (time.perf_counter() - t_total) * 1000,
