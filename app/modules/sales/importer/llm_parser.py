@@ -838,24 +838,54 @@ def _normalize_qty(val: object) -> object:
     return val
 
 
+def _is_junk_row(d: dict) -> bool:
+    """
+    Identify summary / non-transaction rows that the LLM occasionally includes
+    when processing a document chunk without full-document context (e.g.
+    "Party Total ->", "Grand Total", customer-section header rows).
+
+    A real sales row MUST have a product name, a sale date, and a sale qty.
+    If any of these three is missing/empty, the row cannot be a valid sale
+    and the validator would reject it anyway — so we drop it deterministically
+    here to keep the row count honest and the error histogram meaningful.
+    """
+    product = d.get("product_name_raw")
+    if not isinstance(product, str) or not product.strip():
+        return True
+    if d.get("sale_date") in (None, "", "null"):
+        return True
+    qty = d.get("sale_qty")
+    if qty is None or qty == "" or qty == "null":
+        return True
+    return False
+
+
 def _rows_to_dicts(raw_rows: list) -> list[dict]:
     result: list[dict] = []
+    junk_dropped = 0
     for row in raw_rows:
+        d: dict | None = None
         if isinstance(row, dict):
-            row = dict(row)
-            row["sale_date"] = _normalize_date(row.get("sale_date"))
-            row["sale_qty"] = _normalize_qty(row.get("sale_qty"))
-            row["free_qty"] = _normalize_qty(row.get("free_qty"))
-            result.append(row)
+            d = dict(row)
         elif isinstance(row, (list, tuple)):
-            d: dict = {}
+            d = {}
             for i, col in enumerate(_COLUMNS):
                 d[col] = row[i] if i < len(row) else None
-            d["sale_date"] = _normalize_date(d.get("sale_date"))
-            d["sale_qty"] = _normalize_qty(d.get("sale_qty"))
-            d["free_qty"] = _normalize_qty(d.get("free_qty"))
-            result.append(d)
-        # skip anything else (nulls, strings, etc.)
+        else:
+            continue
+        d["sale_date"] = _normalize_date(d.get("sale_date"))
+        d["sale_qty"] = _normalize_qty(d.get("sale_qty"))
+        d["free_qty"] = _normalize_qty(d.get("free_qty"))
+        if _is_junk_row(d):
+            junk_dropped += 1
+            continue
+        result.append(d)
+    if junk_dropped:
+        logger.info(
+            "_rows_to_dicts: dropped %d junk row(s) (no product / no date / no qty) "
+            "from %d raw → %d kept",
+            junk_dropped, len(raw_rows), len(result),
+        )
     return result
 
 

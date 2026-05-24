@@ -199,15 +199,27 @@ async def validate_rows(
     valid_count = sum(1 for r in rows if r.get("is_valid"))
     invalid_count = len(rows) - valid_count
     err_hist: Counter[str] = Counter()
+    # Capture up to 5 sample raw values per failing field for diagnostics.
+    err_samples: dict[str, list[Any]] = {}
+    sample_fields = ("sale_date", "sale_qty", "free_qty", "mrp", "ptr",
+                     "reported_amount", "product_id", "medical_store_id",
+                     "doctor_id", "mr_id")
     for r in rows:
         for e in r.get("errors") or []:
-            # First two words give a stable category bucket: "product_id: ..." -> "product_id:"
-            err_hist[e.split(":", 1)[0] if ":" in e else e[:32]] += 1
+            field = e.split(":", 1)[0] if ":" in e else e[:32]
+            err_hist[field] += 1
+            if field in sample_fields and len(err_samples.get(field, [])) < 5:
+                err_samples.setdefault(field, []).append(r.get(field))
     logger.info(
         "%s validate_rows: done valid=%d invalid=%d total_ms=%.0f errors_by_field=%s",
         log_prefix, valid_count, invalid_count,
         (time.perf_counter() - t_total) * 1000,
         dict(err_hist) if err_hist else {},
     )
+    if err_samples:
+        logger.info(
+            "%s validate_rows: error_value_samples=%s",
+            log_prefix, {k: [repr(v) for v in vs] for k, vs in err_samples.items()},
+        )
 
     return rows
