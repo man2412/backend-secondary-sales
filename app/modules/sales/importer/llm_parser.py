@@ -784,16 +784,76 @@ def _call_openai(req: LLMParseRequest) -> tuple[dict, str]:
 # Array-of-arrays → list[dict] conversion
 # ---------------------------------------------------------------------------
 
+def _normalize_date(val: object) -> object:
+    """
+    Coerce common date formats returned by the LLM to YYYY-MM-DD.
+
+    The LLM is instructed to output ISO dates but sometimes returns the
+    source format (e.g. "14/2/2026" or "14-02-2026") — especially when
+    processing a document chunk without the full-document context.
+    We normalise deterministically here so the validator never sees a
+    non-ISO date that came from a known parseable format.
+    """
+    if not isinstance(val, str):
+        return val
+    s = val.strip()
+    if not s:
+        return val
+    # Already ISO YYYY-MM-DD
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    import re as _re
+    # DD/MM/YYYY  or  D/M/YYYY  or  DD-MM-YYYY  etc.
+    m = _re.fullmatch(r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{4})", s)
+    if m:
+        d, mo, y = m.group(1), m.group(2), m.group(3)
+        return f"{y}-{mo.zfill(2)}-{d.zfill(2)}"
+    # MM/DD/YYYY (unlikely given Indian source data but handle for safety)
+    m2 = _re.fullmatch(r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2})", s)
+    if m2:
+        p1, p2, y2 = m2.group(1), m2.group(2), m2.group(3)
+        year = f"20{y2}" if int(y2) < 50 else f"19{y2}"
+        return f"{year}-{p2.zfill(2)}-{p1.zfill(2)}"
+    return val
+
+
+def _normalize_qty(val: object) -> object:
+    """
+    Ensure sale_qty / free_qty are returned as numbers.
+
+    The LLM occasionally returns fractional quantities (5.5, 0.5) as
+    strings, or returns summary-row values. Coerce to float/int so the
+    validator receives a numeric type, matching what the single-call path
+    has always produced.
+    """
+    if val is None or isinstance(val, (int, float)):
+        return val
+    if isinstance(val, str):
+        s = val.strip()
+        try:
+            f = float(s)
+            return int(f) if f == int(f) else f
+        except ValueError:
+            pass
+    return val
+
+
 def _rows_to_dicts(raw_rows: list) -> list[dict]:
     result: list[dict] = []
     for row in raw_rows:
         if isinstance(row, dict):
-            # LLM returned named objects (shouldn't happen but handle gracefully)
+            row = dict(row)
+            row["sale_date"] = _normalize_date(row.get("sale_date"))
+            row["sale_qty"] = _normalize_qty(row.get("sale_qty"))
+            row["free_qty"] = _normalize_qty(row.get("free_qty"))
             result.append(row)
         elif isinstance(row, (list, tuple)):
             d: dict = {}
             for i, col in enumerate(_COLUMNS):
                 d[col] = row[i] if i < len(row) else None
+            d["sale_date"] = _normalize_date(d.get("sale_date"))
+            d["sale_qty"] = _normalize_qty(d.get("sale_qty"))
+            d["free_qty"] = _normalize_qty(d.get("free_qty"))
             result.append(d)
         # skip anything else (nulls, strings, etc.)
     return result
