@@ -1,6 +1,6 @@
 from app.models.allocation import (
     MrDoctorAllocation,
-    MrLocationAllocation,
+    MrHeadquarterAllocation,
     MrStoreAllocation,
 )
 from app.models.base import Base
@@ -36,7 +36,7 @@ __all__ = [
     "MedicalStoreContact",
     "Doctor",
     "DoctorMedicalStore",
-    "MrLocationAllocation",
+    "MrHeadquarterAllocation",
     "MrDoctorAllocation",
     "MrStoreAllocation",
     "SecondarySale",

@@ -35,7 +35,7 @@ async def list_doctors(
     page: Annotated[int, Query(ge=1)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     q: Annotated[str | None, Query(description="Search: name/phone")] = None,
-    location_id: Annotated[UUID | None, Query()] = None,
+    headquarter_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = DoctorsService()
@@ -43,7 +43,7 @@ async def list_doctors(
         db,
         current,
         q=q,
-        location_id=location_id,
+        headquarter_id=headquarter_id,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,

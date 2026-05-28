@@ -160,7 +160,7 @@ class StockistsService:
         *,
         q: str | None,
         stockist_id: uuid.UUID | None,
-        location_id: uuid.UUID | None,
+        headquarter_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -171,7 +171,7 @@ class StockistsService:
             db,
             q=q,
             stockist_id=stockist_id,
-            location_id=location_id,
+            headquarter_id=headquarter_id,
             active_only=not include_inactive,
             mr_id=mr_filter,
             limit=per_page,
@@ -228,7 +228,7 @@ class StockistsService:
             drug_licence=None,
             pan=None,
             address=None,
-            location_id=None,
+            headquarter_id=None,
             alternate_names=[],
             is_active=False,
         )
@@ -242,7 +242,7 @@ class StockistsService:
                 db,
                 q=None,
                 stockist_id=None,
-                location_id=None,
+                headquarter_id=None,
                 active_only=True,
                 mr_id=user.id,
                 limit=5000,
@@ -266,7 +266,7 @@ class StockistsService:
             drug_licence=body.drug_licence,
             pan=body.pan,
             address=body.address,
-            location_id=body.location_id,
+            headquarter_id=body.headquarter_id,
             alternate_names=body.alternate_names,
         )
 
@@ -293,7 +293,7 @@ class StockistsService:
             drug_licence=data.get("drug_licence"),
             pan=data.get("pan"),
             address=data.get("address"),
-            location_id=data.get("location_id"),
+            headquarter_id=data.get("headquarter_id"),
             alternate_names=data.get("alternate_names"),
             is_active=data.get("is_active"),
         )

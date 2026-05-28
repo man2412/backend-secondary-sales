@@ -13,7 +13,7 @@ class DoctorOut(BaseModel):
     qualification: str | None
     phone: str | None
     address: str | None
-    location_id: uuid.UUID | None
+    headquarter_id: uuid.UUID | None
     is_active: bool
     medical_store_ids: list[uuid.UUID] = Field(default_factory=list)
     created_at: datetime
@@ -26,7 +26,7 @@ class DoctorCreate(BaseModel):
     qualification: str | None = None
     phone: str | None = None
     address: str | None = None
-    location_id: uuid.UUID | None = None
+    headquarter_id: uuid.UUID | None = None
     medical_store_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
@@ -36,6 +36,6 @@ class DoctorUpdate(BaseModel):
     qualification: str | None = None
     phone: str | None = None
     address: str | None = None
-    location_id: uuid.UUID | None = None
+    headquarter_id: uuid.UUID | None = None
     is_active: bool | None = None
     medical_store_ids: list[uuid.UUID] | None = None

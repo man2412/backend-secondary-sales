@@ -6,31 +6,39 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import UserRole
-from app.models.master import Headquarter, Location, State
+from app.models.master import Headquarter, Location
 from app.models.sale import SecondarySale
 
 
 class SalesRepository:
-    async def get_location_context(
-        self, db: AsyncSession, location_id: uuid.UUID
-    ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID] | None:
-        """Returns (state_id, headquarter_id, division_id)."""
-        stmt = (
-            select(
-                State.id,
-                Headquarter.id,
-                Headquarter.division_id,
-            )
-            .select_from(Location)
-            .join(Headquarter, Location.headquarter_id == Headquarter.id)
-            .join(State, Headquarter.state_id == State.id)
-            .where(Location.id == location_id)
+    async def get_headquarter_context(
+        self, db: AsyncSession, headquarter_id: uuid.UUID
+    ) -> tuple[uuid.UUID, list[uuid.UUID]] | None:
+        """Returns (state_id, division_ids[]) for the headquarter, or None if not found.
+
+        A headquarter carries an array of divisions it serves; a sale's product
+        must belong to one of those divisions. The caller derives `division_id`
+        from the product itself, then sanity-checks it against this list.
+        """
+        stmt = select(Headquarter.state_id, Headquarter.division_ids).where(
+            Headquarter.id == headquarter_id
         )
         r = await db.execute(stmt)
         row = r.one_or_none()
         if row is None:
             return None
-        return (row[0], row[1], row[2])
+        return (row[0], list(row[1] or []))
+
+    async def location_belongs_to_headquarter(
+        self, db: AsyncSession, location_id: uuid.UUID, headquarter_id: uuid.UUID
+    ) -> bool:
+        r = await db.execute(
+            select(Location.id).where(
+                Location.id == location_id,
+                Location.headquarter_id == headquarter_id,
+            )
+        )
+        return r.one_or_none() is not None
 
     async def get_sale(self, db: AsyncSession, sale_id: uuid.UUID) -> SecondarySale | None:
         r = await db.execute(select(SecondarySale).where(SecondarySale.id == sale_id))
@@ -133,7 +141,7 @@ class SalesRepository:
         medical_store_id: uuid.UUID | None,
         division_id: uuid.UUID,
         headquarter_id: uuid.UUID,
-        location_id: uuid.UUID,
+        location_id: uuid.UUID | None,
         state_id: uuid.UUID,
         sale_date: date,
         sale_qty: int,

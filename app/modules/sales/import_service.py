@@ -23,10 +23,10 @@ import asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.allocation import MrDoctorAllocation, MrLocationAllocation
+from app.models.allocation import MrDoctorAllocation, MrHeadquarterAllocation
 from app.models.doctor import Doctor, DoctorMedicalStore
 from app.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
-from app.models.master import Headquarter, Location, Product
+from app.models.master import Headquarter, Product
 from app.models.sale import SecondarySale
 from app.models.stockist import MedicalStore
 from app.models.user import User
@@ -277,7 +277,7 @@ class ImportService:
         if mrs_without_alloc:
             names = await self._get_user_names(db, mrs_without_alloc)
             warnings.append(
-                "The following MR(s) have no active location allocations — "
+                "The following MR(s) have no active headquarter allocations — "
                 "commits for their rows will be skipped: " + ", ".join(names)
             )
         logger.info(
@@ -618,10 +618,12 @@ class ImportService:
             state_id = uuid.UUID(row["state_id"]) if row.get("state_id") else None
             division_id = uuid.UUID(row["division_id"]) if row.get("division_id") else None
 
-            if not all([location_id, hq_id, state_id, division_id]):
+            # location_id is optional (nullable on secondary_sales); the
+            # geographic dimension that *must* resolve is headquarter_id.
+            if not all([hq_id, state_id, division_id]):
                 _skip(
-                    "could not derive location chain — ensure the medical store (or doctor) "
-                    "has a location_id, the location maps to a headquarter, and the product has a division"
+                    "could not derive headquarter chain — ensure the medical store "
+                    "(or doctor) has a headquarter_id, and the product has a division"
                 )
                 continue
 
@@ -988,9 +990,10 @@ class ImportService:
         Auto-populate derived fields on each row using batch DB lookups:
 
           division_id    <- product.division_id
-          location_id    <- medical_store.location_id (fallback: doctor.location_id)
-          headquarter_id <- location.headquarter_id
+          headquarter_id <- medical_store.headquarter_id (fallback: doctor.headquarter_id)
           state_id       <- headquarter.state_id
+          location_id    <- None (sale.location_id is nullable; sub-location is
+                                  no longer derived from store/doctor)
 
         Also auto-fills `doctor_id` when null and (mr_id, medical_store_id) are
         known: the unique doctor that is both linked to the store
@@ -1095,48 +1098,35 @@ class ImportService:
             ).all()
             product_map = {r[0]: r[1] for r in rs}
 
-        store_map: dict[uuid.UUID, uuid.UUID | None] = {}  # store_id -> location_id
+        store_map: dict[uuid.UUID, uuid.UUID | None] = {}  # store_id -> headquarter_id
         if store_ids:
             rs = (
                 await db.execute(
-                    select(MedicalStore.id, MedicalStore.location_id).where(
+                    select(MedicalStore.id, MedicalStore.headquarter_id).where(
                         MedicalStore.id.in_(store_ids)
                     )
                 )
             ).all()
             store_map = {r[0]: r[1] for r in rs}
 
-        doctor_map: dict[uuid.UUID, uuid.UUID | None] = {}  # doctor_id -> location_id
+        doctor_map: dict[uuid.UUID, uuid.UUID | None] = {}  # doctor_id -> headquarter_id
         if doctor_ids:
             rs = (
                 await db.execute(
-                    select(Doctor.id, Doctor.location_id).where(Doctor.id.in_(doctor_ids))
+                    select(Doctor.id, Doctor.headquarter_id).where(Doctor.id.in_(doctor_ids))
                 )
             ).all()
             doctor_map = {r[0]: r[1] for r in rs}
 
-        # ---------- Step C: gather location ids from stores + doctors ----------
-        location_ids: set[uuid.UUID] = set()
+        # ---------- Step C: fetch headquarter -> state_id ----------
+        hq_ids: set[uuid.UUID] = set()
         for v in store_map.values():
             if v is not None:
-                location_ids.add(v)
+                hq_ids.add(v)
         for v in doctor_map.values():
             if v is not None:
-                location_ids.add(v)
+                hq_ids.add(v)
 
-        location_map: dict[uuid.UUID, uuid.UUID] = {}  # location_id -> hq_id
-        if location_ids:
-            rs = (
-                await db.execute(
-                    select(Location.id, Location.headquarter_id).where(
-                        Location.id.in_(location_ids)
-                    )
-                )
-            ).all()
-            location_map = {r[0]: r[1] for r in rs}
-
-        # ---------- Step D: fetch headquarter -> state_id ----------
-        hq_ids: set[uuid.UUID] = {v for v in location_map.values() if v is not None}
         hq_map: dict[uuid.UUID, uuid.UUID] = {}  # hq_id -> state_id
         if hq_ids:
             rs = (
@@ -1146,8 +1136,8 @@ class ImportService:
             ).all()
             hq_map = {r[0]: r[1] for r in rs}
 
-        # ---------- Step E: per-row derivation ----------
-        div_filled = loc_filled = hq_filled = state_filled = 0
+        # ---------- Step D: per-row derivation ----------
+        div_filled = hq_filled = state_filled = 0
         for row in rows:
             pid = _pid(row.get("product_id"))
             sid = _pid(row.get("medical_store_id"))
@@ -1155,24 +1145,24 @@ class ImportService:
 
             division_id = product_map.get(pid) if pid else None
 
-            location_id: uuid.UUID | None = None
+            hq_id: uuid.UUID | None = None
             if sid is not None:
-                location_id = store_map.get(sid)
-            if location_id is None and did is not None:
-                location_id = doctor_map.get(did)
+                hq_id = store_map.get(sid)
+            if hq_id is None and did is not None:
+                hq_id = doctor_map.get(did)
 
-            hq_id = location_map.get(location_id) if location_id else None
             state_id = hq_map.get(hq_id) if hq_id else None
 
             row["division_id"] = str(division_id) if division_id else None
-            row["location_id"] = str(location_id) if location_id else None
+            # location_id is no longer derived from store/doctor; sale rows
+            # carry it as nullable. Set explicitly to None so downstream code
+            # that reads the field never sees stale data.
+            row["location_id"] = None
             row["headquarter_id"] = str(hq_id) if hq_id else None
             row["state_id"] = str(state_id) if state_id else None
 
             if division_id:
                 div_filled += 1
-            if location_id:
-                loc_filled += 1
             if hq_id:
                 hq_filled += 1
             if state_id:
@@ -1180,49 +1170,48 @@ class ImportService:
 
         n = len(rows)
         logger.info(
-            "%s enrich_derived: rows=%d auto_doctor=%d division=%d/%d location=%d/%d "
+            "%s enrich_derived: rows=%d auto_doctor=%d division=%d/%d "
             "hq=%d/%d state=%d/%d",
             log_prefix, n, autofilled_doctor_count,
-            div_filled, n, loc_filled, n, hq_filled, n, state_filled, n,
+            div_filled, n, hq_filled, n, state_filled, n,
         )
 
     # ------------------------------------------------------------------
     # Allocation helpers
     # ------------------------------------------------------------------
 
-    async def _resolve_mr_location(
+    async def _resolve_mr_headquarter(
         self,
         db: AsyncSession,
         mr_id: uuid.UUID,
         product_id: uuid.UUID,
-    ) -> tuple[uuid.UUID | None, uuid.UUID | None, uuid.UUID | None, uuid.UUID | None]:
-        from app.models.master import Headquarter
+    ) -> tuple[uuid.UUID | None, uuid.UUID | None, uuid.UUID | None]:
+        """Return (state_id, headquarter_id, division_id) for an MR + product.
 
+        Picks the first active MR-headquarter allocation whose HQ serves the
+        product's division. Returns all-None if the MR has no qualifying
+        allocation.
+        """
         product = await db.get(Product, product_id)
         if product is None:
-            return None, None, None, None
+            return None, None, None
 
         stmt = (
-            select(MrLocationAllocation.location_id, Location.headquarter_id)
-            .join(Location, MrLocationAllocation.location_id == Location.id)
-            .join(Headquarter, Location.headquarter_id == Headquarter.id)
+            select(MrHeadquarterAllocation.headquarter_id, Headquarter.state_id)
+            .join(Headquarter, MrHeadquarterAllocation.headquarter_id == Headquarter.id)
             .where(
-                MrLocationAllocation.mr_id == mr_id,
-                MrLocationAllocation.is_active.is_(True),
+                MrHeadquarterAllocation.mr_id == mr_id,
+                MrHeadquarterAllocation.is_active.is_(True),
                 Headquarter.division_ids.contains([product.division_id]),
             )
             .limit(1)
         )
         row = (await db.execute(stmt)).one_or_none()
         if row is None:
-            return None, None, None, None
+            return None, None, None
 
-        location_id, hq_id = row
-        hq = await db.get(Headquarter, hq_id)
-        if hq is None:
-            return None, None, None, None
-
-        return location_id, hq.state_id, hq_id, product.division_id
+        hq_id, state_id = row
+        return state_id, hq_id, product.division_id
 
     async def _explain_allocation_failure(
         self,
@@ -1246,24 +1235,23 @@ class ImportService:
 
         alloc_rows = (
             await db.execute(
-                select(MrLocationAllocation.id)
-                .where(MrLocationAllocation.mr_id == mr_id)
-                .where(MrLocationAllocation.is_active.is_(True))
+                select(MrHeadquarterAllocation.id)
+                .where(MrHeadquarterAllocation.mr_id == mr_id)
+                .where(MrHeadquarterAllocation.is_active.is_(True))
             )
         ).all()
 
         if not alloc_rows:
             return (
-                f"MR '{mr_name}' has no active location allocations. "
-                f"Create one in mr_location_allocations before committing."
+                f"MR '{mr_name}' has no active headquarter allocations. "
+                f"Create one in mr_headquarter_allocations before committing."
             )
 
         return (
-            f"MR '{mr_name}' has {len(alloc_rows)} active location allocation(s), "
-            f"but none belong to a headquarter covering division "
-            f"'{product_div_name or 'unknown'}' (product: {product_name}). "
-            f"Either assign the MR to an HQ that includes this division, "
-            f"or add this division to one of the MR's current HQs."
+            f"MR '{mr_name}' has {len(alloc_rows)} active headquarter allocation(s), "
+            f"but none cover division '{product_div_name or 'unknown'}' "
+            f"(product: {product_name}). Either assign the MR to an HQ that "
+            f"includes this division, or add this division to one of the MR's current HQs."
         )
 
     async def _find_mrs_without_allocations(
@@ -1275,9 +1263,9 @@ class ImportService:
             return set()
         rows = (
             await db.execute(
-                select(MrLocationAllocation.mr_id)
-                .where(MrLocationAllocation.mr_id.in_(mr_ids))
-                .where(MrLocationAllocation.is_active.is_(True))
+                select(MrHeadquarterAllocation.mr_id)
+                .where(MrHeadquarterAllocation.mr_id.in_(mr_ids))
+                .where(MrHeadquarterAllocation.is_active.is_(True))
                 .distinct()
             )
         ).all()

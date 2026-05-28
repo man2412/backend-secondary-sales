@@ -4,17 +4,19 @@ from collections.abc import Sequence
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.allocation import MrDoctorAllocation, MrLocationAllocation, MrStoreAllocation
+from app.models.allocation import MrDoctorAllocation, MrHeadquarterAllocation, MrStoreAllocation
 from app.models.doctor import Doctor
-from app.models.master import Location
+from app.models.master import Headquarter
 from app.models.stockist import MedicalStore
 
 
 class AllocationsRepository:
-    async def get_location_alloc(
+    async def get_headquarter_alloc(
         self, db: AsyncSession, alloc_id: uuid.UUID
-    ) -> MrLocationAllocation | None:
-        r = await db.execute(select(MrLocationAllocation).where(MrLocationAllocation.id == alloc_id))
+    ) -> MrHeadquarterAllocation | None:
+        r = await db.execute(
+            select(MrHeadquarterAllocation).where(MrHeadquarterAllocation.id == alloc_id)
+        )
         return r.scalar_one_or_none()
 
     async def get_doctor_alloc(self, db: AsyncSession, alloc_id: uuid.UUID) -> MrDoctorAllocation | None:
@@ -25,13 +27,13 @@ class AllocationsRepository:
         r = await db.execute(select(MrStoreAllocation).where(MrStoreAllocation.id == alloc_id))
         return r.scalar_one_or_none()
 
-    async def list_location_alloc_rows(
+    async def list_headquarter_alloc_rows(
         self, db: AsyncSession, mr_id: uuid.UUID, active_only: bool
-    ) -> Sequence[MrLocationAllocation]:
-        q = select(MrLocationAllocation).where(MrLocationAllocation.mr_id == mr_id)
+    ) -> Sequence[MrHeadquarterAllocation]:
+        q = select(MrHeadquarterAllocation).where(MrHeadquarterAllocation.mr_id == mr_id)
         if active_only:
-            q = q.where(MrLocationAllocation.is_active.is_(True))
-        q = q.order_by(MrLocationAllocation.allocated_at.desc())
+            q = q.where(MrHeadquarterAllocation.is_active.is_(True))
+        q = q.order_by(MrHeadquarterAllocation.allocated_at.desc())
         return (await db.execute(q)).scalars().all()
 
     async def list_doctor_alloc_rows(
@@ -52,8 +54,8 @@ class AllocationsRepository:
         q = q.order_by(MrStoreAllocation.allocated_at.desc())
         return (await db.execute(q)).scalars().all()
 
-    async def location_name(self, db: AsyncSession, location_id: uuid.UUID) -> str | None:
-        r = await db.execute(select(Location.name).where(Location.id == location_id))
+    async def headquarter_name(self, db: AsyncSession, headquarter_id: uuid.UUID) -> str | None:
+        r = await db.execute(select(Headquarter.name).where(Headquarter.id == headquarter_id))
         row = r.one_or_none()
         return row[0] if row else None
 
@@ -67,12 +69,14 @@ class AllocationsRepository:
         row = r.one_or_none()
         return row[0] if row else None
 
-    async def location_names_map(
-        self, db: AsyncSession, location_ids: set[uuid.UUID]
+    async def headquarter_names_map(
+        self, db: AsyncSession, headquarter_ids: set[uuid.UUID]
     ) -> dict[uuid.UUID, str]:
-        if not location_ids:
+        if not headquarter_ids:
             return {}
-        r = await db.execute(select(Location.id, Location.name).where(Location.id.in_(location_ids)))
+        r = await db.execute(
+            select(Headquarter.id, Headquarter.name).where(Headquarter.id.in_(headquarter_ids))
+        )
         return {row[0]: row[1] for row in r.all()}
 
     async def doctor_names_map(
@@ -91,18 +95,18 @@ class AllocationsRepository:
         r = await db.execute(select(MedicalStore.id, MedicalStore.name).where(MedicalStore.id.in_(store_ids)))
         return {row[0]: row[1] for row in r.all()}
 
-    async def upsert_location_alloc(
+    async def upsert_headquarter_alloc(
         self,
         db: AsyncSession,
         *,
         mr_id: uuid.UUID,
-        location_id: uuid.UUID,
+        headquarter_id: uuid.UUID,
         allocated_by: uuid.UUID,
-    ) -> MrLocationAllocation:
+    ) -> MrHeadquarterAllocation:
         r = await db.execute(
-            select(MrLocationAllocation).where(
-                MrLocationAllocation.mr_id == mr_id,
-                MrLocationAllocation.location_id == location_id,
+            select(MrHeadquarterAllocation).where(
+                MrHeadquarterAllocation.mr_id == mr_id,
+                MrHeadquarterAllocation.headquarter_id == headquarter_id,
             )
         )
         existing = r.scalar_one_or_none()
@@ -112,9 +116,9 @@ class AllocationsRepository:
             await db.flush()
             await db.refresh(existing)
             return existing
-        row = MrLocationAllocation(
+        row = MrHeadquarterAllocation(
             mr_id=mr_id,
-            location_id=location_id,
+            headquarter_id=headquarter_id,
             allocated_by=allocated_by,
             is_active=True,
         )
@@ -187,7 +191,9 @@ class AllocationsRepository:
         await db.refresh(row)
         return row
 
-    async def soft_delete_location(self, db: AsyncSession, row: MrLocationAllocation) -> None:
+    async def soft_delete_headquarter(
+        self, db: AsyncSession, row: MrHeadquarterAllocation
+    ) -> None:
         row.is_active = False
         await db.flush()
         await db.refresh(row)

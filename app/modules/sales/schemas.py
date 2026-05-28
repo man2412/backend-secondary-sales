@@ -22,7 +22,7 @@ class SecondarySaleOut(BaseModel):
     medical_store_id: uuid.UUID | None
     division_id: uuid.UUID
     headquarter_id: uuid.UUID
-    location_id: uuid.UUID
+    location_id: uuid.UUID | None = None
     state_id: uuid.UUID
     sale_date: date
     sale_qty: int
@@ -49,7 +49,8 @@ class SecondarySaleCreate(BaseModel):
     product_id: uuid.UUID
     doctor_id: uuid.UUID | None = None
     medical_store_id: uuid.UUID | None = None
-    location_id: uuid.UUID
+    headquarter_id: uuid.UUID
+    location_id: uuid.UUID | None = None
     sale_date: date
     sale_qty: int = Field(..., ge=1)
     free_qty: int = Field(default=0, ge=0)

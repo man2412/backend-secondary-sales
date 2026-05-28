@@ -41,7 +41,7 @@ def parse_secondary_sales_xlsx(content: bytes) -> list[dict]:
     Expected columns (case-insensitive, underscores/spaces ok):
       - mr_id (required for SUPER_ADMIN import)
       - product_id (required)
-      - location_id (required)
+      - headquarter_id (required)
       - sale_date (required, YYYY-MM-DD)
       - sale_qty (required)
       - free_qty (optional)
@@ -70,7 +70,7 @@ def parse_secondary_sales_xlsx(content: bytes) -> list[dict]:
             {
                 "mr_id": _parse_uuid(get("mr_id")),
                 "product_id": _parse_uuid(get("product_id")),
-                "location_id": _parse_uuid(get("location_id")),
+                "headquarter_id": _parse_uuid(get("headquarter_id")),
                 "sale_date": _parse_date(get("sale_date")),
                 "sale_qty": _parse_int(get("sale_qty")),
                 "free_qty": _parse_int(get("free_qty"), 0),
@@ -108,7 +108,7 @@ def parse_secondary_sales_pdf(content: bytes) -> list[dict]:
                     {
                         "mr_id": _parse_uuid(get("mr_id")),
                         "product_id": _parse_uuid(get("product_id")),
-                        "location_id": _parse_uuid(get("location_id")),
+                        "headquarter_id": _parse_uuid(get("headquarter_id")),
                         "sale_date": _parse_date(get("sale_date")),
                         "sale_qty": _parse_int(get("sale_qty")),
                         "free_qty": _parse_int(get("free_qty"), 0),

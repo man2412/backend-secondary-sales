@@ -5,7 +5,7 @@ from decimal import Decimal
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.allocation import MrDoctorAllocation, MrLocationAllocation, MrStoreAllocation
+from app.models.allocation import MrDoctorAllocation, MrHeadquarterAllocation, MrStoreAllocation
 from app.models.enums import UserRole
 from app.models.sale import SecondarySale
 from app.models.user import User
@@ -113,14 +113,14 @@ class SalesService:
         )
         return r.one_or_none() is not None
 
-    async def _has_location_alloc(
-        self, db: AsyncSession, mr_id: uuid.UUID, location_id: uuid.UUID
+    async def _has_headquarter_alloc(
+        self, db: AsyncSession, mr_id: uuid.UUID, headquarter_id: uuid.UUID
     ) -> bool:
         r = await db.execute(
-            select(MrLocationAllocation.id).where(
-                MrLocationAllocation.mr_id == mr_id,
-                MrLocationAllocation.location_id == location_id,
-                MrLocationAllocation.is_active.is_(True),
+            select(MrHeadquarterAllocation.id).where(
+                MrHeadquarterAllocation.mr_id == mr_id,
+                MrHeadquarterAllocation.headquarter_id == headquarter_id,
+                MrHeadquarterAllocation.is_active.is_(True),
             )
         )
         return r.one_or_none() is not None
@@ -243,23 +243,30 @@ class SalesService:
         mr_user = await urepo.get_by_id(db, mr_id)
         if mr_user is None or mr_user.role != UserRole.MR or not mr_user.is_active:
             raise ValueError("Target mr_id must be an active MR user")
-        ctx = await self._repo.get_location_context(db, body.location_id)
+        ctx = await self._repo.get_headquarter_context(db, body.headquarter_id)
         if ctx is None:
-            raise ValueError("Location not found")
-        state_id, hq_id, division_id = ctx
-        loc_row = await self._master.get_location(db, body.location_id)
-        if loc_row is None or not loc_row.is_active:
-            raise ValueError("Location not found")
+            raise ValueError("Headquarter not found")
+        state_id, hq_division_ids = ctx
+        hq_row = await self._master.get_headquarter(db, body.headquarter_id)
+        if hq_row is None or not hq_row.is_active:
+            raise ValueError("Headquarter not found")
         product = await self._master.get_product(db, body.product_id)
         if product is None or not product.is_active:
             raise ValueError("Product not found")
-        if product.division_id != division_id:
-            raise ValueError("Product division does not match location division")
+        if product.division_id not in hq_division_ids:
+            raise ValueError("Product division is not served by this headquarter")
+        division_id = product.division_id
         div = await self._master.get_division(db, division_id)
         if div is None:
             raise ValueError("Invalid division for sale")
-        if not await self._has_location_alloc(db, mr_id, body.location_id):
-            raise ValueError("Location not allocated to you")
+        # Optional sub-location: must belong to the chosen HQ when provided.
+        if body.location_id is not None:
+            if not await self._repo.location_belongs_to_headquarter(
+                db, body.location_id, body.headquarter_id
+            ):
+                raise ValueError("Location does not belong to the given headquarter")
+        if not await self._has_headquarter_alloc(db, mr_id, body.headquarter_id):
+            raise ValueError("Headquarter not allocated to you")
         if body.doctor_id is not None:
             doc = await self._doctors.get_doctor(db, body.doctor_id)
             if doc is None or not doc.is_active:
@@ -286,7 +293,7 @@ class SalesService:
             doctor_id=body.doctor_id,
             medical_store_id=body.medical_store_id,
             division_id=division_id,
-            headquarter_id=hq_id,
+            headquarter_id=body.headquarter_id,
             location_id=body.location_id,
             state_id=state_id,
             sale_date=body.sale_date,

@@ -11,8 +11,8 @@ from app.modules.allocations.schemas import (
     AllocationOps,
     DoctorAllocCreate,
     DoctorAllocOut,
-    LocationAllocCreate,
-    LocationAllocOut,
+    HeadquarterAllocCreate,
+    HeadquarterAllocOut,
     StoreAllocCreate,
     StoreAllocOut,
 )
@@ -63,27 +63,27 @@ class AllocationsService:
     ) -> AllocationsBundleOut:
         await self._require_view_mr(db, user, mr_id)
         active_only = not include_inactive
-        locs = await self._repo.list_location_alloc_rows(db, mr_id, active_only)
+        hqs = await self._repo.list_headquarter_alloc_rows(db, mr_id, active_only)
         docs = await self._repo.list_doctor_alloc_rows(db, mr_id, active_only)
         stores = await self._repo.list_store_alloc_rows(db, mr_id, active_only)
 
-        loc_ids = {a.location_id for a in locs}
+        hq_ids = {a.headquarter_id for a in hqs}
         doc_ids = {a.doctor_id for a in docs}
         store_ids = {a.medical_store_id for a in stores}
-        loc_names, doc_names, store_names = await asyncio.gather(
-            self._repo.location_names_map(db, loc_ids),
+        hq_names, doc_names, store_names = await asyncio.gather(
+            self._repo.headquarter_names_map(db, hq_ids),
             self._repo.doctor_names_map(db, doc_ids),
             self._repo.store_names_map(db, store_ids),
         )
 
-        loc_out: list[LocationAllocOut] = []
-        for a in locs:
-            loc_out.append(
-                LocationAllocOut(
+        hq_out: list[HeadquarterAllocOut] = []
+        for a in hqs:
+            hq_out.append(
+                HeadquarterAllocOut(
                     id=a.id,
                     mr_id=a.mr_id,
-                    location_id=a.location_id,
-                    location_name=loc_names.get(a.location_id),
+                    headquarter_id=a.headquarter_id,
+                    headquarter_name=hq_names.get(a.headquarter_id),
                     allocated_by=a.allocated_by,
                     allocated_at=a.allocated_at,
                     is_active=a.is_active,
@@ -115,24 +115,24 @@ class AllocationsService:
                     is_active=a.is_active,
                 )
             )
-        return AllocationsBundleOut(locations=loc_out, doctors=doc_out, medical_stores=st_out)
+        return AllocationsBundleOut(headquarters=hq_out, doctors=doc_out, medical_stores=st_out)
 
-    async def add_location(
-        self, db: AsyncSession, user: User, mr_id: uuid.UUID, body: LocationAllocCreate
-    ) -> LocationAllocOut:
+    async def add_headquarter(
+        self, db: AsyncSession, user: User, mr_id: uuid.UUID, body: HeadquarterAllocCreate
+    ) -> HeadquarterAllocOut:
         self._require_can_manage_allocations(user)
         await self._require_view_mr(db, user, mr_id)
-        loc = await self._master.get_location(db, body.location_id)
-        if loc is None or not loc.is_active:
-            raise ValueError("Location not found")
-        row = await self._repo.upsert_location_alloc(
-            db, mr_id=mr_id, location_id=body.location_id, allocated_by=user.id
+        hq = await self._master.get_headquarter(db, body.headquarter_id)
+        if hq is None or not hq.is_active:
+            raise ValueError("Headquarter not found")
+        row = await self._repo.upsert_headquarter_alloc(
+            db, mr_id=mr_id, headquarter_id=body.headquarter_id, allocated_by=user.id
         )
-        return LocationAllocOut(
+        return HeadquarterAllocOut(
             id=row.id,
             mr_id=row.mr_id,
-            location_id=row.location_id,
-            location_name=await self._repo.location_name(db, row.location_id),
+            headquarter_id=row.headquarter_id,
+            headquarter_name=await self._repo.headquarter_name(db, row.headquarter_id),
             allocated_by=row.allocated_by,
             allocated_at=row.allocated_at,
             is_active=row.is_active,
@@ -181,13 +181,13 @@ class AllocationsService:
             is_active=row.is_active,
         )
 
-    async def delete_location(self, db: AsyncSession, user: User, alloc_id: uuid.UUID) -> None:
+    async def delete_headquarter(self, db: AsyncSession, user: User, alloc_id: uuid.UUID) -> None:
         self._require_can_manage_allocations(user)
-        row = await self._repo.get_location_alloc(db, alloc_id)
+        row = await self._repo.get_headquarter_alloc(db, alloc_id)
         if row is None:
             raise ValueError("Allocation not found")
         await self._require_view_mr(db, user, row.mr_id)
-        await self._repo.soft_delete_location(db, row)
+        await self._repo.soft_delete_headquarter(db, row)
 
     async def delete_doctor(self, db: AsyncSession, user: User, alloc_id: uuid.UUID) -> None:
         self._require_can_manage_allocations(user)
@@ -210,10 +210,10 @@ class AllocationsService:
         self._require_can_manage_allocations(user)
         await self._require_view_mr(db, user, mr_id)
 
-        for lid in ops.add_locations:
-            await self.add_location(db, user, mr_id, LocationAllocCreate(location_id=lid))
-        for did in ops.remove_location_alloc_ids:
-            await self.delete_location(db, user, did)
+        for hid in ops.add_headquarters:
+            await self.add_headquarter(db, user, mr_id, HeadquarterAllocCreate(headquarter_id=hid))
+        for did in ops.remove_headquarter_alloc_ids:
+            await self.delete_headquarter(db, user, did)
 
         for d in ops.add_doctors:
             await self.add_doctor(db, user, mr_id, d)

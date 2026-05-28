@@ -22,7 +22,7 @@ class DoctorsService:
             qualification=doc.qualification,
             phone=doc.phone,
             address=doc.address,
-            location_id=doc.location_id,
+            headquarter_id=doc.headquarter_id,
             is_active=doc.is_active,
             medical_store_ids=mids,
             created_at=doc.created_at,
@@ -35,7 +35,7 @@ class DoctorsService:
         user: User,
         *,
         q: str | None,
-        location_id: uuid.UUID | None,
+        headquarter_id: uuid.UUID | None,
         page: int,
         per_page: int,
         include_inactive: bool,
@@ -45,7 +45,7 @@ class DoctorsService:
         rows, total = await self._repo.list_doctors(
             db,
             q=q,
-            location_id=location_id,
+            headquarter_id=headquarter_id,
             active_only=not include_inactive,
             mr_id=mr_filter,
             limit=per_page,
@@ -68,7 +68,7 @@ class DoctorsService:
             qualification=None,
             phone=None,
             address=None,
-            location_id=None,
+            headquarter_id=None,
             is_active=False,
         )
         await db.refresh(row)
@@ -81,6 +81,8 @@ class DoctorsService:
         if user.role == UserRole.MR:
             visible, _ = await self._repo.list_doctors(
                 db,
+                q=None,
+                headquarter_id=None,
                 active_only=True,
                 mr_id=user.id,
                 limit=5000,
@@ -98,7 +100,7 @@ class DoctorsService:
             qualification=body.qualification,
             phone=body.phone,
             address=body.address,
-            location_id=body.location_id,
+            headquarter_id=body.headquarter_id,
         )
         if body.medical_store_ids:
             await self._repo.set_medical_store_links(db, doc.id, body.medical_store_ids)
@@ -123,7 +125,7 @@ class DoctorsService:
                 qualification=data.get("qualification"),
                 phone=data.get("phone"),
                 address=data.get("address"),
-                location_id=data.get("location_id"),
+                headquarter_id=data.get("headquarter_id"),
                 is_active=data.get("is_active"),
             )
         if store_ids is not None:

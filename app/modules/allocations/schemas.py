@@ -7,11 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field
 _LEGACY_DIVISION_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
 
-class LocationAllocOut(BaseModel):
+class HeadquarterAllocOut(BaseModel):
     id: uuid.UUID
     mr_id: uuid.UUID
-    location_id: uuid.UUID
-    location_name: str | None
+    headquarter_id: uuid.UUID
+    headquarter_name: str | None
     allocated_by: uuid.UUID
     allocated_at: datetime
     is_active: bool
@@ -54,14 +54,14 @@ class StoreAllocOut(BaseModel):
 
 
 class AllocationsBundleOut(BaseModel):
-    locations: list[LocationAllocOut]
+    headquarters: list[HeadquarterAllocOut]
     doctors: list[DoctorAllocOut]
     medical_stores: list[StoreAllocOut]
     products: list[ProductAllocOut] = Field(default_factory=list)
 
 
-class LocationAllocCreate(BaseModel):
-    location_id: uuid.UUID
+class HeadquarterAllocCreate(BaseModel):
+    headquarter_id: uuid.UUID
 
 
 class DoctorAllocCreate(BaseModel):
@@ -75,8 +75,8 @@ class StoreAllocCreate(BaseModel):
 class AllocationOps(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    add_locations: list[uuid.UUID] = Field(default_factory=list)
-    remove_location_alloc_ids: list[uuid.UUID] = Field(default_factory=list)
+    add_headquarters: list[uuid.UUID] = Field(default_factory=list)
+    remove_headquarter_alloc_ids: list[uuid.UUID] = Field(default_factory=list)
     add_doctors: list[DoctorAllocCreate] = Field(default_factory=list)
     remove_doctor_alloc_ids: list[uuid.UUID] = Field(default_factory=list)
     add_stores: list[uuid.UUID] = Field(default_factory=list)

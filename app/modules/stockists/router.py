@@ -188,7 +188,7 @@ async def list_medical_stores(
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     q: Annotated[str | None, Query(description="Search: name/gst/pan/unique_code")] = None,
     stockist_id: Annotated[UUID | None, Query()] = None,
-    location_id: Annotated[UUID | None, Query()] = None,
+    headquarter_id: Annotated[UUID | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     svc = StockistsService()
@@ -197,7 +197,7 @@ async def list_medical_stores(
         current,
         q=q,
         stockist_id=stockist_id,
-        location_id=location_id,
+        headquarter_id=headquarter_id,
         page=page,
         per_page=per_page,
         include_inactive=include_inactive,

@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.allocation import MrDoctorAllocation
 from app.models.doctor import Doctor, DoctorMedicalStore
-from app.models.master import Headquarter, Location, State
 
 
 class DoctorsRepository:
@@ -33,7 +32,7 @@ class DoctorsRepository:
         db: AsyncSession,
         *,
         q: str | None,
-        location_id: uuid.UUID | None,
+        headquarter_id: uuid.UUID | None,
         active_only: bool,
         mr_id: uuid.UUID | None,
         limit: int,
@@ -44,9 +43,9 @@ class DoctorsRepository:
         if active_only:
             base = base.where(Doctor.is_active.is_(True))
             count_q = count_q.where(Doctor.is_active.is_(True))
-        if location_id is not None:
-            base = base.where(Doctor.location_id == location_id)
-            count_q = count_q.where(Doctor.location_id == location_id)
+        if headquarter_id is not None:
+            base = base.where(Doctor.headquarter_id == headquarter_id)
+            count_q = count_q.where(Doctor.headquarter_id == headquarter_id)
         if mr_id is not None:
             subq = select(MrDoctorAllocation.doctor_id).where(
                 MrDoctorAllocation.mr_id == mr_id,
@@ -72,7 +71,7 @@ class DoctorsRepository:
         qualification: str | None,
         phone: str | None,
         address: str | None,
-        location_id: uuid.UUID | None,
+        headquarter_id: uuid.UUID | None,
     ) -> Doctor:
         row = Doctor(
             full_name=full_name,
@@ -80,7 +79,7 @@ class DoctorsRepository:
             qualification=qualification,
             phone=phone,
             address=address,
-            location_id=location_id,
+            headquarter_id=headquarter_id,
             is_active=True,
         )
         db.add(row)
@@ -98,7 +97,7 @@ class DoctorsRepository:
         qualification: str | None,
         phone: str | None,
         address: str | None,
-        location_id: uuid.UUID | None,
+        headquarter_id: uuid.UUID | None,
         is_active: bool | None,
     ) -> Doctor:
         if full_name is not None:
@@ -111,8 +110,8 @@ class DoctorsRepository:
             row.phone = phone
         if address is not None:
             row.address = address
-        if location_id is not None:
-            row.location_id = location_id
+        if headquarter_id is not None:
+            row.headquarter_id = headquarter_id
         if is_active is not None:
             row.is_active = is_active
         await db.flush()

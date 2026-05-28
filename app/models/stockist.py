@@ -72,7 +72,9 @@ class MedicalStore(Base, TimestampMixin):
     drug_licence: Mapped[str | None] = mapped_column(String(100))
     pan: Mapped[str | None] = mapped_column(String(20))
     address: Mapped[str | None] = mapped_column(Text())
-    location_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("locations.id"))
+    headquarter_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("headquarters.id")
+    )
     alternate_names: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

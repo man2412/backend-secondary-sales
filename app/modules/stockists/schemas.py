@@ -86,7 +86,7 @@ class MedicalStoreOut(BaseModel):
     drug_licence: str | None
     pan: str | None
     address: str | None
-    location_id: uuid.UUID | None
+    headquarter_id: uuid.UUID | None
     alternate_names: list[str] | None = None
     is_active: bool
     created_at: datetime
@@ -101,7 +101,7 @@ class MedicalStoreCreate(BaseModel):
     drug_licence: str | None = None
     pan: str | None = None
     address: str | None = None
-    location_id: uuid.UUID | None = None
+    headquarter_id: uuid.UUID | None = None
     alternate_names: list[str] | None = None
 
 
@@ -113,6 +113,6 @@ class MedicalStoreUpdate(BaseModel):
     drug_licence: str | None = None
     pan: str | None = None
     address: str | None = None
-    location_id: uuid.UUID | None = None
+    headquarter_id: uuid.UUID | None = None
     alternate_names: list[str] | None = None
     is_active: bool | None = None

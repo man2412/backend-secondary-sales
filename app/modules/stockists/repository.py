@@ -5,7 +5,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.allocation import MrStoreAllocation
-from app.models.master import Location
 from app.models.stockist import MedicalStore, Stockist, SuperStockist
 
 
@@ -221,7 +220,7 @@ class StockistsRepository:
         *,
         q: str | None,
         stockist_id: uuid.UUID | None,
-        location_id: uuid.UUID | None,
+        headquarter_id: uuid.UUID | None,
         active_only: bool,
         mr_id: uuid.UUID | None,
         limit: int,
@@ -235,9 +234,9 @@ class StockistsRepository:
         if stockist_id is not None:
             base = base.where(MedicalStore.stockist_id == stockist_id)
             count_q = count_q.where(MedicalStore.stockist_id == stockist_id)
-        if location_id is not None:
-            base = base.where(MedicalStore.location_id == location_id)
-            count_q = count_q.where(MedicalStore.location_id == location_id)
+        if headquarter_id is not None:
+            base = base.where(MedicalStore.headquarter_id == headquarter_id)
+            count_q = count_q.where(MedicalStore.headquarter_id == headquarter_id)
         if mr_id is not None:
             subq = select(MrStoreAllocation.medical_store_id).where(
                 MrStoreAllocation.mr_id == mr_id,
@@ -275,7 +274,7 @@ class StockistsRepository:
         drug_licence: str | None,
         pan: str | None,
         address: str | None,
-        location_id: uuid.UUID | None,
+        headquarter_id: uuid.UUID | None,
         alternate_names: list[str] | None,
     ) -> MedicalStore:
         row = MedicalStore(
@@ -286,7 +285,7 @@ class StockistsRepository:
             drug_licence=drug_licence,
             pan=pan,
             address=address,
-            location_id=location_id,
+            headquarter_id=headquarter_id,
             alternate_names=alternate_names,
             is_active=True,
         )
@@ -307,7 +306,7 @@ class StockistsRepository:
         drug_licence: str | None,
         pan: str | None,
         address: str | None,
-        location_id: uuid.UUID | None,
+        headquarter_id: uuid.UUID | None,
         alternate_names: list[str] | None,
         is_active: bool | None,
     ) -> MedicalStore:
@@ -325,8 +324,8 @@ class StockistsRepository:
             row.pan = pan
         if address is not None:
             row.address = address
-        if location_id is not None:
-            row.location_id = location_id
+        if headquarter_id is not None:
+            row.headquarter_id = headquarter_id
         if alternate_names is not None:
             row.alternate_names = alternate_names
         if is_active is not None:
