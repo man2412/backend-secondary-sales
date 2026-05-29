@@ -93,8 +93,8 @@ Return JSON: {"rows": [[col0, col1, ..., col12], ...]}
 Column order — exactly 13 values per row:
   0  product_name     exact product name string from the file
   1  sale_date        date as YYYY-MM-DD; null if absent
-  2  sale_qty         integer quantity sold; null if absent
-  3  free_qty         integer free quantity; 0 if absent
+  2  sale_qty         numeric quantity sold (can be negative for sale-returns); null if absent
+  3  free_qty         numeric free quantity; 0 if absent
   4  mrp              decimal MRP; null if absent
   5  ptr              decimal Rate / selling price; null if absent
   6  reported_amount  decimal Amount / Value total as reported; null if absent
@@ -105,12 +105,31 @@ Column order — exactly 13 values per row:
   11 mr_name          FOS / MR name from the file; null if not present per-row
   12 doctor_name      doctor name from the file; null if not present
 
+Input may be plain text, markdown pipe-tables, or HTML `<table>` blocks.
+
+HTML table format (typical distributor report output):
+- Each PDF page is one `<table>...</table>` block.
+- The FIRST `<tr>` of every table is the column-header row, e.g.:
+    <tr><td>Product</td><td>Pack</td><td>BillRef</td><td>Date</td>
+        <td>MRP Batch</td><td>Qty</td><td>Free</td><td>Rate</td><td>Amount</td></tr>
+  Use this header row to identify which `<td>` cell maps to which output column.
+- A `<tr>` whose only cell is `<td colspan="9">CUSTOMER NAME, CITY, CITY</td>` is a
+  customer-section header — NOT a data row. Use its text as the customer_name for
+  every subsequent data row in that table, until another colspan customer-section
+  row appears.
+- The "MRP Batch" cell often contains BOTH the MRP and the batch number separated
+  by a space (e.g. "84.23 CGX03AGA") — split it: numeric → mrp (col 4),
+  remainder → batch (col 8).
+- Rows like `Party Total ->`, `Grand Total`, `Page Total` are subtotals — SKIP them.
+
 Rules:
 - Skip subtotal rows ("Party Total", "Grand Total", "Customer Total") and page headers.
 - If a customer section header introduces a block of rows for one customer, repeat
   that customer name in column 10 of every row in that block.
-- Parse all date formats to YYYY-MM-DD.
+- Parse all date formats to YYYY-MM-DD (input may be D/M/YYYY, DD-MM-YYYY, etc.).
 - Numbers may use comma thousand-separators — parse them as plain decimals.
+- Negative quantities indicate sale-returns (bill refs often contain "SR") — keep
+  them as negative numbers; do NOT drop them and do NOT make them positive.
 - Do NOT invent data. Only extract what is explicitly present in the file.\
 """
 
@@ -196,22 +215,80 @@ def _call_mineru_extract(pdf_bytes: bytes, *, log_prefix: str = "") -> str:
 # Markdown chunking — split large MinerU markdown into N parallel chunks
 # ---------------------------------------------------------------------------
 #
-# Two PDF output structures from MinerU, both handled:
+# Three PDF output structures from MinerU, all handled:
 #
 #  Structure A — "section-per-customer" (structured PDF):
 #    ## Customer: ABC Pharmacy
 #    | Product | Qty | ...
 #    ## Customer: XYZ Drug
 #    | Product | Qty | ...
-#    → Split at `#` heading boundaries. Each chunk gets self-contained sections.
+#    → Strategy 1: split at `#` heading boundaries.
 #
-#  Structure B — "multi-page table" (distributor report, most common):
-#    MinerU emits ONE separate markdown table per PDF page.
-#    Each page table starts with a column-header row + |---| separator, then
-#    customer-section rows (colspan → | CUSTOMER NAME | | | | ... |) and
-#    data rows.  Customers that span pages are safe to split: MinerU repeats
-#    the customer-name row on the continuation page's table.
-#    → Detect all table-start (header+separator) pairs; split at page boundaries.
+#  Structure B — "HTML page-table" (distributor reports, most common in prod):
+#    MinerU emits ONE `<table>...</table>` per PDF page. Each table is on a
+#    single (very long) line and is self-contained: first <tr> is the column-
+#    header row, subsequent <tr><td colspan="9">NAME</td></tr> rows mark
+#    customer sections, and data rows follow. Customers that span pages are
+#    safe to split: the customer-section header row is repeated at the top
+#    of every continuation page's table.
+#    → Strategy 2a: split between adjacent `<table>` blocks.
+#
+#  Structure C — "markdown pipe-table per page":
+#    Each page table starts with a column-header row + |---| separator,
+#    then customer-section rows (colspan → | CUSTOMER NAME | | | | ... |)
+#    and data rows.
+#    → Strategy 2b: split at pipe-table page boundaries.
+#
+# Strategy 3 (safe line-count fallback) cuts only at blank lines or after
+# </table> — never mid-table. Strategy 4 is the naive char-balanced fallback.
+
+def _balance_boundaries(
+    boundary_candidates: list[int],
+    n: int,
+    cumulative_chars: list[int],
+) -> list[int]:
+    """
+    Given a sorted list of safe cut indices (each pointing to a line where a new
+    section begins), pick `n - 1` boundaries that split the document into n
+    roughly equal chunks by character count.
+
+    `cumulative_chars[i]` is the total chars from line 0 up to (but not
+    including) line `i`. This lets us compute the char-position of any
+    candidate boundary in O(1) and pick the candidates closest to the
+    ideal char-position targets (total_chars/n, 2*total_chars/n, ...).
+
+    Picking boundaries by char-position rather than by ordinal position
+    in the candidate list is critical when section sizes are uneven
+    (e.g. some PDF pages have 30+ sale rows, others have 3).
+    """
+    if n <= 1 or not boundary_candidates:
+        return []
+    total_chars = cumulative_chars[-1] if cumulative_chars else 0
+    if total_chars <= 0:
+        return []
+    targets = [(m * total_chars) // n for m in range(1, n)]
+    chosen: list[int] = []
+    used: set[int] = set()
+    cand_positions = [cumulative_chars[b] for b in boundary_candidates]
+    for t in targets:
+        # Find the candidate boundary whose char-position is closest to t,
+        # skipping any already-used boundary (so we never pick the same one
+        # twice when n > number of candidate gaps).
+        best_idx = -1
+        best_diff = float("inf")
+        for i, pos in enumerate(cand_positions):
+            if i in used:
+                continue
+            diff = abs(pos - t)
+            if diff < best_diff:
+                best_diff = diff
+                best_idx = i
+        if best_idx < 0:
+            break
+        used.add(best_idx)
+        chosen.append(boundary_candidates[best_idx])
+    return sorted(set(chosen))
+
 
 def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
     """
@@ -223,14 +300,24 @@ def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
        where MinerU emits one `##` heading per customer. Requires ≥ n-1
        heading boundaries after line 0.
 
-    2. Page-table-boundary split: for multi-page distributor reports where
-       MinerU emits one markdown table per PDF page. Detects each table-start
-       (column-header row + |---| separator) and splits at page boundaries.
-       Safe because cross-page customer sections have their header row repeated
-       by MinerU on the continuation page. Requires ≥ n page tables.
+    2a. HTML page-table split: MinerU sometimes emits one `<table>...</table>`
+        per PDF page (typical for distributor reports rendered as HTML tables).
+        Split between adjacent `<table>` blocks so every chunk starts cleanly
+        at a `<table>` opener and ends at a `</table>` closer — never inside
+        a table. This is the safest and highest-priority strategy for HTML
+        output because each `<table>` is self-contained (column headers +
+        customer-section rows are repeated at the top of every page table).
 
-    3. Single call: if neither works, return [text]. The caller detects this
-       and uses single-call mode (accuracy preserved, no speedup).
+    2b. Markdown pipe-table split: for distributor reports where MinerU emits
+        one markdown pipe-table per PDF page. Detects each table-start
+        (column-header row + |---| separator) and splits at page boundaries.
+
+    3. Line-count split with safe boundaries: cut between logical blocks
+       (after `</table>` or after a blank line) at positions closest to the
+       ideal char-targets. Never cuts mid-table or mid-row.
+
+    4. Single call: if nothing safe is found, return [text]. Accuracy
+       preserved; the caller uses single-call mode.
     """
     if n <= 1 or not text:
         return [text] if text else []
@@ -239,41 +326,75 @@ def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
     if len(lines) < n * 2:
         return [text]
 
+    # Pre-compute cumulative char positions so any strategy can pick boundaries
+    # by char-position (which respects uneven section sizes) in O(1) per pick.
+    cum: list[int] = [0]
+    for ln in lines:
+        cum.append(cum[-1] + len(ln))
+
+    def _emit(boundaries: list[int]) -> list[str]:
+        out: list[str] = []
+        prev = 0
+        for b in boundaries:
+            out.append("".join(lines[prev:b]))
+            prev = b
+        out.append("".join(lines[prev:]))
+        return [c for c in out if c.strip()]
+
     # --- Strategy 1: heading-based split ---
     heading_idxs = [i for i, ln in enumerate(lines) if ln.lstrip().startswith("#")]
     boundary_candidates = [i for i in heading_idxs if i > 0]
     if len(boundary_candidates) >= n - 1:
-        L = len(boundary_candidates)
-        if L == n - 1:
-            boundaries = list(boundary_candidates)
-        else:
-            boundaries = [boundary_candidates[(i * L) // n] for i in range(1, n)]
-        boundaries = sorted(set(boundaries))
-        chunks: list[str] = []
-        prev = 0
-        for b in boundaries:
-            chunks.append("".join(lines[prev:b]))
-            prev = b
-        chunks.append("".join(lines[prev:]))
-        chunks = [c for c in chunks if c.strip()]
+        boundaries = _balance_boundaries(boundary_candidates, n, cum)
+        chunks = _emit(boundaries)
         if len(chunks) >= 2:
+            logger.info(
+                "split: strategy1 heading produced %d chunks (boundaries=%d candidates)",
+                len(chunks), len(boundary_candidates),
+            )
             return chunks
 
-    # --- Strategy 2: page-table-boundary split ---
+    # --- Strategy 2a: HTML <table> page-boundary split ---
     #
-    # MinerU emits ONE markdown table per PDF page. Each page table starts with
-    # a column-header row immediately followed by a |---| separator row, e.g.:
+    # MinerU often emits ONE HTML `<table>...</table>` per PDF page, with each
+    # table on its own (very long) line. Every page table is self-contained:
     #
-    #   | Product | Pack | BillRef | Date | MRP Batch | Qty | Free | Rate | Amount |
-    #   |---|---|---|---|---|---|---|---|---|
-    #   | KRISHANA MEDICINES, RAJKOT... | | | | | | | | |   ← customer-section row
-    #   | JUGSI DM FORTE TAB | 10 TAB | GCD/757 | ...      ← data row
-    #   ...
+    #   <table><tr><td>Product</td><td>Pack</td><td>BillRef</td><td>Date</td>...
+    #          <tr><td colspan="9">CUSTOMER NAME, CITY, CITY</td></tr>
+    #          <tr><td>PRODUCT</td><td>10 TAB</td><td>CA-T/12345</td><td>5/2/2026</td>...
+    #          ...
+    #   </table>
     #
-    # Customer sections that span PDF pages are safe to split between: MinerU
-    # repeats the customer-name row at the top of the continuation table on the
-    # next page, so every chunk is self-contained and the LLM never loses context.
+    # Customer sections that span pages are safe to split between: MinerU
+    # repeats the customer-section header row at the top of every continuation
+    # page's table, so every chunk gets full column-header + customer context.
+    #
+    # Safe boundary = the FIRST line of any `<table>` block AFTER the very first
+    # one. Cutting there means the previous chunk ends with `</table>` (plus
+    # trailing blanks/metadata) and the next chunk begins with `<table>...`.
+    html_table_starts: list[int] = []
+    for i, ln in enumerate(lines):
+        # Strip leading whitespace and a possible "  NN: " line-number prefix
+        # (MinerU markdown preview format) — but here we treat plain content.
+        if "<table" in ln.lower():
+            html_table_starts.append(i)
+    if len(html_table_starts) >= n:
+        # Candidate boundaries: every <table>-start after the very first one.
+        # That guarantees chunk 1 contains at least one full table and every
+        # later chunk also starts with a fresh <table>.
+        candidates = html_table_starts[1:]
+        if len(candidates) >= n - 1:
+            boundaries = _balance_boundaries(candidates, n, cum)
+            chunks = _emit(boundaries)
+            if len(chunks) >= 2:
+                logger.info(
+                    "split: strategy2a HTML <table> produced %d chunks "
+                    "(html_tables=%d candidates=%d)",
+                    len(chunks), len(html_table_starts), len(candidates),
+                )
+                return chunks
 
+    # --- Strategy 2b: markdown pipe-table page-boundary split ---
     def _is_sep(ln: str) -> bool:
         s = ln.strip()
         return (
@@ -283,15 +404,12 @@ def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
             and "-" in s
         )
 
-    # Walk lines once to find every table-start position:
-    # a non-separator | row immediately followed (skipping blanks) by a separator.
     table_start_idxs: list[int] = []
     k = 0
     while k < len(lines):
         ln = lines[k]
         stripped = ln.strip()
         if stripped.startswith("|") and not _is_sep(ln):
-            # Peek ahead for separator
             j = k + 1
             while j < len(lines) and not lines[j].strip():
                 j += 1
@@ -302,42 +420,59 @@ def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
         k += 1
 
     logger.info(
-        "split: strategy2 found %d page-table boundaries (need >= %d)",
+        "split: strategy2b pipe-table found %d boundaries (need >= %d)",
         len(table_start_idxs), n,
     )
-    # Need at least n distinct page-tables to split into n chunks.
     if len(table_start_idxs) >= n:
-        # Candidate boundaries: every table-start after the very first one.
-        boundary_candidates = table_start_idxs[1:]
-        L = len(boundary_candidates)
-        if L >= n - 1:
-            if L == n - 1:
-                boundaries = list(boundary_candidates)
-            else:
-                boundaries = [boundary_candidates[(m * L) // n] for m in range(1, n)]
-            boundaries = sorted(set(boundaries))
-            chunks: list[str] = []
-            prev = 0
-            for b in boundaries:
-                chunks.append("".join(lines[prev:b]))
-                prev = b
-            chunks.append("".join(lines[prev:]))
-            chunks = [c for c in chunks if c.strip()]
+        candidates = table_start_idxs[1:]
+        if len(candidates) >= n - 1:
+            boundaries = _balance_boundaries(candidates, n, cum)
+            chunks = _emit(boundaries)
             if len(chunks) >= 2:
+                logger.info(
+                    "split: strategy2b pipe-table produced %d chunks",
+                    len(chunks),
+                )
                 return chunks
 
-    # --- Strategy 3: line-count split at safe line boundaries ---
+    # --- Strategy 3: line-count split at SAFE boundaries only ---
     #
-    # Both structure-aware strategies failed (no headings, no page-table pattern).
-    # Fall back to splitting the document into n roughly equal parts by character
-    # count, but always cut at a newline boundary — never mid-row. This is safe
-    # even for markdown tables because each row is self-contained on its own line.
+    # Structure-aware strategies all failed. Fall back to char-count balancing,
+    # but only cut at SAFE line boundaries — never mid-table:
+    #   - after a line ending with `</table>` (HTML table end)
+    #   - after a blank line that is preceded by data (paragraph break)
     #
-    # Accuracy risk is low: MinerU repeats context rows (customer name) at page
-    # breaks, so the LLM in each chunk has enough context even without seeing the
-    # full document. A small overlap is NOT needed here because MinerU's output is
-    # row-oriented (one sale per line).
-    total_chars = sum(len(ln) for ln in lines)
+    # This avoids the failure mode where strategy3 would otherwise put the
+    # END of a table in chunk N and the START of the next table in chunk N+1
+    # with no usable context in between.
+    safe_boundary_idxs: list[int] = []
+    for i, ln in enumerate(lines):
+        if i == 0:
+            continue
+        prev = lines[i - 1]
+        # boundary BEFORE line `i` is safe when prev is a structural close
+        if "</table>" in prev.lower():
+            safe_boundary_idxs.append(i)
+            continue
+        # …or when prev is blank AND we're not at the very top of the doc
+        if prev.strip() == "" and i > 1:
+            safe_boundary_idxs.append(i)
+
+    if len(safe_boundary_idxs) >= n - 1:
+        boundaries = _balance_boundaries(safe_boundary_idxs, n, cum)
+        chunks = _emit(boundaries)
+        if len(chunks) >= 2:
+            logger.info(
+                "split: strategy3 safe-line-boundary produced %d chunks "
+                "(safe_boundaries=%d total_chars=%d)",
+                len(chunks), len(safe_boundary_idxs), cum[-1],
+            )
+            return chunks
+
+    # --- Strategy 4: naive line-count split (last-resort) ---
+    # Only used if even safe boundaries aren't available. May cut between any
+    # two adjacent lines, but never mid-line.
+    total_chars = cum[-1]
     target = total_chars // n
     chunks_fb: list[str] = []
     buf: list[str] = []
@@ -355,8 +490,9 @@ def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
         chunks_fb.append("".join(buf))
     chunks_fb = [c for c in chunks_fb if c.strip()]
     if len(chunks_fb) >= 2:
-        logger.info(
-            "split: strategy3 line-count produced %d chunks from %d chars",
+        logger.warning(
+            "split: strategy4 naive line-count produced %d chunks from %d chars "
+            "— no safe boundaries available, may split between non-structural lines",
             len(chunks_fb), total_chars,
         )
         return chunks_fb
@@ -368,11 +504,17 @@ def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
 # Row deduplication — composite key on the natural identity of a sale row
 # ---------------------------------------------------------------------------
 #
-# Used after combining rows from parallel chunks. A row is uniquely identified
-# by (sale_date, customer_name, product_name, sale_qty, bill_ref). Repeats are
-# extremely rare for legitimate data — same product to same customer on same
-# day with same qty and same invoice ref — so collisions almost always mean
-# the LLM emitted the same physical row twice across chunk boundaries.
+# Used after combining rows from parallel chunks. A sale row is uniquely
+# identified by (sale_date, customer, product, sale_qty, bill_ref, batch, mrp).
+#
+# `batch` and `mrp` MUST be part of the key: a single invoice (bill_ref) can
+# legitimately contain multiple lines for the same product/qty when different
+# stock lots are dispatched together, e.g.:
+#
+#   APTIVOG MV 2  CA-T/33038  27/2/2026  114.04 ST25-3519  1  ...
+#   APTIVOG MV 2  CA-T/33038  27/2/2026  121.65 ST25-2194  1  ...
+#
+# Without `batch` in the key, the two rows above would collapse into one.
 
 def _dedupe_rows(raw_rows: list) -> tuple[list, int]:
     """
@@ -384,39 +526,50 @@ def _dedupe_rows(raw_rows: list) -> tuple[list, int]:
     duplicate the user can review than to silently merge two legitimate
     rows that happen to share product/customer/date/qty.
 
-    Composite key = (sale_date, customer, product, sale_qty, bill_ref).
+    Composite key = (sale_date, customer, product, sale_qty, bill_ref,
+                     batch, mrp).
     """
     seen: set[tuple] = set()
     unique: list = []
 
+    def _norm(val: object) -> str:
+        return str(val).strip() if val is not None else ""
+
     for row in raw_rows:
         if isinstance(row, (list, tuple)):
             # _COLUMNS index map: 0 product, 1 sale_date, 2 sale_qty,
-            # 7 bill_ref, 10 customer_name
+            # 4 mrp, 7 bill_ref, 8 batch, 10 customer_name
             key = (
-                str(row[1] or "").strip() if len(row) > 1 else "",
-                str(row[10] or "").strip() if len(row) > 10 else "",
-                str(row[0] or "").strip() if len(row) > 0 else "",
-                str(row[2] or "").strip() if len(row) > 2 else "",
-                str(row[7] or "").strip() if len(row) > 7 else "",
+                _norm(row[1]) if len(row) > 1 else "",
+                _norm(row[10]) if len(row) > 10 else "",
+                _norm(row[0]) if len(row) > 0 else "",
+                _norm(row[2]) if len(row) > 2 else "",
+                _norm(row[7]) if len(row) > 7 else "",
+                _norm(row[8]) if len(row) > 8 else "",
+                _norm(row[4]) if len(row) > 4 else "",
             )
         elif isinstance(row, dict):
             key = (
-                str(row.get("sale_date") or "").strip(),
-                str(row.get("customer_name_raw") or row.get("customer_name") or "").strip(),
-                str(row.get("product_name_raw") or row.get("product_name") or "").strip(),
-                str(row.get("sale_qty") or "").strip(),
-                str(row.get("bill_ref") or "").strip(),
+                _norm(row.get("sale_date")),
+                _norm(row.get("customer_name_raw") or row.get("customer_name")),
+                _norm(row.get("product_name_raw") or row.get("product_name")),
+                _norm(row.get("sale_qty")),
+                _norm(row.get("bill_ref")),
+                _norm(row.get("batch")),
+                _norm(row.get("mrp")),
             )
         else:
             unique.append(row)
             continue
 
-        # Conservative: only consider deduping when EVERY key component is
-        # populated. Missing fields → can't tell duplicate from coincidence,
-        # so always keep the row. The user reviews preview and can manually
-        # remove true duplicates.
-        if not all(key):
+        # Conservative: only consider deduping when the IDENTITY components
+        # are all populated. We require date/customer/product/qty/bill_ref to
+        # be present; batch/mrp may be empty (older imports without batch
+        # info) and are then ignored for the uniqueness check. This still
+        # keeps APTIVOG-style multi-batch rows distinct as long as the LLM
+        # extracted the batch for at least one of them.
+        identity_required = key[:5]
+        if not all(identity_required):
             unique.append(row)
             continue
 
@@ -605,10 +758,31 @@ def _call_gemini_chunked(
 
     def _do_one(idx: int, chunk_text: str) -> tuple[int, list, Exception | None]:
         chunk_prefix = f"{log_prefix}[c{idx + 1}/{n}]"
+        # Log first/last 200 chars so we can see exactly what each chunk
+        # contains and verify the splitter cut at safe boundaries.
+        head = chunk_text[:200].replace("\n", "\\n")
+        tail = chunk_text[-200:].replace("\n", "\\n")
+        logger.info(
+            "%s chunk_preview chars=%d head=%r tail=%r",
+            chunk_prefix, len(chunk_text), head, tail,
+        )
         user_part = (
             f"Extract all sale rows from the following distributor report "
             f"(this is part {idx + 1} of {n}, sent in parallel — extract only "
-            f"what is in this part).{fos_hint}\n\n{chunk_text}"
+            f"what is in THIS part; do not invent rows from other parts).\n\n"
+            "IMPORTANT for chunked input:\n"
+            "- Each `<table>` in this chunk is self-contained: its first `<tr>` "
+            "is the column-header row — use it to know which `<td>` is Date, Qty, etc.\n"
+            "- A `<tr>` whose only cell is `<td colspan=\"9\">NAME</td>` is the "
+            "customer-section header — apply that customer name to every data row "
+            "until another colspan row appears, or until the table ends.\n"
+            "- This chunk may begin with text BEFORE the first `<table>` (page "
+            "metadata like \"Normal\", \"From: ... To: ...\", or a standalone "
+            "customer name line). That text is just context — do not emit rows for it.\n"
+            "- If the chunk's first `<table>` has no leading customer-section "
+            "header inside it, use the standalone customer name line that appears "
+            "in the text immediately before that `<table>` as the customer name.\n"
+            f"{fos_hint}\n\n{chunk_text}"
         )
         last_exc: Exception | None = None
         t_chunk = time.perf_counter()
