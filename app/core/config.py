@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
     GEMINI_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
-    MINERU_API_KEY: str = ""
+    MINERU_API_KEY: str = "eyJ0eXBlIjoiSldUIiwiYWxnIjoiSFM1MTIifQ.eyJqdGkiOiI5MzAwMDM2NiIsInJvbCI6IlJPTEVfUkVHSVNURVIiLCJpc3MiOiJPcGVuWExhYiIsImlhdCI6MTc3OTUzNzY3MywiY2xpZW50SWQiOiJsa3pkeDU3bnZ5MjJqa3BxOXgydyIsInBob25lIjoiIiwib3BlbklkIjpudWxsLCJ1dWlkIjoiYzY1ZmI4MjgtMDAyZC00MGUyLTkzYWItNDBmNGNmNTQ4ZTAwIiwiZW1haWwiOiJrcmNoYWRtaXlhMjAwMkBnbWFpbC5jb20iLCJleHAiOjE3ODczMTM2NzN9.TL9z2_NxLzLA56_KghvEVIZW5iRFuBylY02avOihC1l6y_xLG-WpfbCOSyJrZPYAQ1OGVGYuGvgxx7fCJg6HOg"
     # Logging level for the app's own loggers (DEBUG | INFO | WARNING | ERROR).
     # Set to DEBUG when investigating slow imports / failures.
     LOG_LEVEL: str = "INFO"

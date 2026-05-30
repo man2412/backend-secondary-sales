@@ -36,6 +36,7 @@ def _configure_logging() -> None:
 _configure_logging()
 from app.modules.allocations.router import router as allocations_router
 from app.modules.auth.router import router as auth_router
+from app.modules.dashboard.router import router as dashboard_router
 from app.modules.doctors.router import router as doctors_router
 from app.modules.entity_import.router import router as entity_import_router
 from app.modules.master.router import router as master_router
@@ -71,6 +72,7 @@ app.include_router(doctors_router, prefix=v1)
 app.include_router(allocations_router, prefix=v1)
 app.include_router(sales_router, prefix=v1)
 app.include_router(reports_router, prefix=v1)
+app.include_router(dashboard_router, prefix=v1)
 app.include_router(entity_import_router, prefix=v1)
 
 
