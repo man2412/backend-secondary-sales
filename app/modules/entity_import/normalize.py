@@ -34,7 +34,7 @@ from difflib import SequenceMatcher
 # NBSP and friends often appear when copy-pasting from Excel/Word.
 _NBSP_AND_FRIENDS = re.compile(r"[\u00a0\u2000-\u200b\u202f\u205f\u3000]")
 _MULTI_WS = re.compile(r"\s+")
-_PUNCT_TO_SPACE = re.compile(r"[,\-_/.()'\":!?@#&*+]+")
+_PUNCT_TO_SPACE = re.compile(r"[,\-_/.()'\":!?@#&*+\[\]]+")
 
 
 def clean_whitespace(s: str | None) -> str:
@@ -126,7 +126,11 @@ def _strip_leading_codes(s: str) -> str:
         '341S387 - SHYAM MEDICINES, SATELLITE'  → 'SHYAM MEDICINES, SATELLITE'
         'AMB27 - AMBICA MEDICAL STORE'         → 'AMBICA MEDICAL STORE'
     Recognises tokens that are ≥4 chars, alphanumeric, and contain at least one digit.
+
+    Also strips the 'Party Name : ' prefix emitted by some billing-software exports:
+        'Party Name : SHREE RANG PHARMACY NAVSARI, NAVSARI-'  → 'SHREE RANG PHARMACY NAVSARI, NAVSARI-'
     """
+    s = re.sub(r"^Party\s+Name\s*:\s*", "", s, flags=re.IGNORECASE).strip()
     parts = s.split(" - ", 1)
     if len(parts) != 2:
         return s
@@ -304,23 +308,16 @@ def normalize_doctor_name(raw: str | None) -> str:
 
     Strategy:
       - drop degree parentheticals like '(MD)', '(MBBS)'
-      - drop all non-letter chars (so 'A.R.' and 'AR' collapse)
-      - upper-case, then *sort* tokens alphabetically
+      - upper-case and collapse whitespace, preserving everything else
 
-    Sorting handles the common pharma data quirk where the same doctor is
-    written as both 'FIRST LAST' and 'LAST FIRST' (e.g. 'ARVIND PATEL' /
-    'PATEL ARVIND'). Returns '' for empty input.
+    Returns '' for empty input.
     """
     s = clean_whitespace(raw)
     if not s:
         return ""
     s = re.sub(r"\([^)]*\)", " ", s)
-    s = re.sub(r"[^A-Za-z ]", " ", s)
     s = _MULTI_WS.sub(" ", s).strip().upper()
-    if not s:
-        return ""
-    tokens = sorted(t for t in s.split() if t)
-    return " ".join(tokens)
+    return s
 
 
 def normalize_person_name(raw: str | None) -> str:

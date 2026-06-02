@@ -279,6 +279,7 @@ async def dashboard_product_growth(
     current: Annotated[User, Depends(get_current_user)],
     mode: Annotated[str, Query(description="mom | qoq | yoy")] = "mom",
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    reference_date: Annotated[_QDate | None, Query(description="Anchor date for period calculation; defaults to today")] = None,
     scope_user_id: Annotated[UUID | None, Query()] = None,
     state_id: Annotated[UUID | None, Query()] = None,
     headquarter_id: Annotated[UUID | None, Query()] = None,
@@ -288,13 +289,18 @@ async def dashboard_product_growth(
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     """Top growing and degrowing products comparing the current period vs the
-    previous comparable period (MoM, QoQ, YoY)."""
+    previous comparable period (MoM, QoQ, YoY).
+
+    Pass `reference_date` to anchor the comparison to a specific date rather
+    than today — useful when the most recent data is not in the current period.
+    """
     try:
         out = await DashboardService().product_growth(
             db,
             current,
             scope_user_id=scope_user_id,
             mode=mode,
+            today=reference_date,
             limit=limit,
             filters=_build_filters(
                 state_id=state_id,

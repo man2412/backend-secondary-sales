@@ -38,7 +38,6 @@ from app.modules.entity_import.normalize import (
     is_fuzzy_match,
     normalize_doctor_name,
     normalize_hq_key,
-    normalize_person_name,
     normalize_store_core,
     normalize_store_name,
     normalize_stockist_key,
@@ -812,10 +811,16 @@ class EntityImportService:
         (or none), the row is logged as a warning and skipped.
         """
         # Build name→[users] index from all active MRs.
+        # Use only whitespace normalisation + uppercase — digits and punctuation
+        # like hyphens are preserved so that "RAJKOT-1" and "RAJKOT-2" stay
+        # distinct and never collapse into each other.
+        def _fso_key(s: str | None) -> str:
+            return clean_whitespace(s).upper() if s else ""
+
         mrs = await self._repo.list_mr_users(db)
         mr_by_norm: dict[str, list[User]] = defaultdict(list)
         for u in mrs:
-            mr_by_norm[normalize_person_name(u.full_name)].append(u)
+            mr_by_norm[_fso_key(u.full_name)].append(u)
 
         # Build (mr_id, doctor_id) pairs we want active.
         wanted: set[tuple[uuid.UUID, uuid.UUID]] = set()
@@ -828,7 +833,7 @@ class EntityImportService:
             doctor = doctor_by_key.get(doctor_key) if doctor_key else None
             if doctor is None:
                 continue
-            fso_norm = normalize_person_name(r.fso_name)
+            fso_norm = _fso_key(r.fso_name)
             if not fso_norm:
                 continue
             candidates = mr_by_norm.get(fso_norm, [])
