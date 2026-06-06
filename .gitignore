@@ -1,0 +1,21 @@
+# Environment / secrets — never commit these
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling / OS
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log

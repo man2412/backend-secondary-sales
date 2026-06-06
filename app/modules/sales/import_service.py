@@ -198,28 +198,41 @@ class ImportService:
             (time.perf_counter() - t_step) * 1000,
         )
 
-        # 3. Load entity catalogues for backend fuzzy matching
-        #    (MRs are resolved from store → doctor allocations, not by name)
+        # 3. Load entity catalogues for backend fuzzy matching. MR names ARE
+        #    matched from the file when present (Fso / TERRITORY column); MRs
+        #    not named in the file fall back to the store→doctor allocation chain.
         t_step = time.perf_counter()
         products = await self._get_all_products(db)
         medical_stores = await self._get_all_stores(db)
         doctors = await self._get_all_doctors(db)
+        mrs = await self._get_all_mrs(db)
         logger.info(
-            "%s step3 load_entities: products=%d stores(+aliases)=%d doctors=%d "
+            "%s step3 load_entities: products=%d stores(+aliases)=%d doctors=%d mrs=%d "
             "elapsed_ms=%.0f",
-            prefix, len(products), len(medical_stores), len(doctors),
+            prefix, len(products), len(medical_stores), len(doctors), len(mrs),
             (time.perf_counter() - t_step) * 1000,
         )
 
-        # 4. Fuzzy resolve product / store / doctor names → UUIDs
+        # 4. Fuzzy resolve product / store / doctor / MR names → UUIDs
         t_step = time.perf_counter()
         resolved_rows = self._fuzzy_resolve_entities(
-            resp.rows, products, medical_stores, doctors,
+            resp.rows, products, medical_stores, doctors, mrs,
             log_prefix=prefix,
         )
         logger.info(
             "%s step4 fuzzy_resolve: rows=%d elapsed_ms=%.0f",
             prefix, len(resolved_rows),
+            (time.perf_counter() - t_step) * 1000,
+        )
+
+        # 4b. Fill sale_date for dateless rows from the report month.
+        t_step = time.perf_counter()
+        report_month, dates_estimated = self._apply_report_month(
+            resolved_rows, resp.report_month, job.filename, log_prefix=prefix,
+        )
+        logger.info(
+            "%s step4b report_month: month=%s dates_estimated=%d elapsed_ms=%.0f",
+            prefix, report_month, dates_estimated,
             (time.perf_counter() - t_step) * 1000,
         )
 
@@ -287,16 +300,43 @@ class ImportService:
             (time.perf_counter() - t_step) * 1000,
         )
 
-        # 8. Persist
+        # 8. Persist — with loud failure signalling. "Extracted nothing" or
+        #    "nothing committable" must NEVER masquerade as a silent 'ready'.
         valid_n = sum(1 for r in validated if r.get("is_valid"))
         invalid_n = len(validated) - valid_n
+
+        if dates_estimated:
+            warnings.insert(
+                0,
+                f"{dates_estimated} row(s) had no date in the file — assigned to "
+                f"{report_month or 'the report month'} (1st of month). Adjust in preview if needed.",
+            )
+
         job.structured_rows = validated
         job.total_rows = len(validated)
         job.model_used = resp.model_used or None
         job.chunks_total = 1
         job.chunks_succeeded = 1
-        job.extraction_warnings = warnings if warnings else None
-        job.status = ImportJobStatus.partial if warnings else ImportJobStatus.ready
+
+        if len(validated) == 0:
+            job.status = ImportJobStatus.failed
+            job.error_message = (
+                "No sale rows could be extracted from this file. Confirm it is an "
+                "itemized secondary-sales report (not a scanned image or a summary "
+                "with no product lines), then re-upload."
+            )
+            job.extraction_warnings = warnings or None
+        elif valid_n == 0:
+            warnings.insert(
+                0,
+                f"None of the {len(validated)} extracted row(s) are ready to commit — "
+                "assign the missing product / medical store / MR in preview.",
+            )
+            job.status = ImportJobStatus.partial
+            job.extraction_warnings = warnings
+        else:
+            job.extraction_warnings = warnings if warnings else None
+            job.status = ImportJobStatus.partial if warnings else ImportJobStatus.ready
         await db.flush()
         logger.info(
             "%s step8 persist: status=%s total_rows=%d valid=%d invalid=%d warnings=%d",
@@ -314,6 +354,7 @@ class ImportService:
         products: list[EntityCandidate],
         medical_stores: list[EntityCandidate],
         doctors: list[EntityCandidate],
+        mrs: list[EntityCandidate],
         *,
         log_prefix: str = "",
     ) -> list[dict]:
@@ -328,9 +369,10 @@ class ImportService:
 
         Unresolved names are left as None — the frontend handles manual assignment.
 
-        Note: MR names are NOT fuzzy-matched here. mr_id is resolved separately
-        via `_resolve_mrs_from_stores` using the medical-store → doctor → MR
-        allocation chain.
+        MR names ARE matched here when the file carries them (e.g. a
+        Fso/TERRITORY column). Rows whose MR is not named in the file keep
+        mr_id=None and are resolved later via `_resolve_mrs_from_stores`
+        (medical-store → doctor → MR allocation chain).
 
         Implementation note: levels 1-2 are O(1) dict lookups; levels 3-4 are
         linear scans (kept on the precomputed normalized list); level 5 uses
@@ -340,10 +382,12 @@ class ImportService:
         prod_uppers = [(c.name or "").upper() for c in products]
         store_uppers = [(c.name or "").upper() for c in medical_stores]
         doc_uppers = [(c.name or "").upper() for c in doctors]
+        mr_uppers = [(c.name or "").upper() for c in mrs]
 
         prod_norms = [_normalize(c.name) for c in products]
         store_norms = [_normalize(c.name) for c in medical_stores]
         doc_norms = [_normalize(c.name) for c in doctors]
+        mr_norms = [_normalize(c.name) for c in mrs]
 
         # Build O(1) lookup dicts for levels 1 & 2. First-occurrence wins so
         # behaviour matches the original linear-scan tie-breaking exactly.
@@ -360,12 +404,15 @@ class ImportService:
         store_norm_map = _build_dict(store_norms, medical_stores)
         doc_upper_map = _build_dict(doc_uppers, doctors)
         doc_norm_map = _build_dict(doc_norms, doctors)
+        mr_upper_map = _build_dict(mr_uppers, mrs)
+        mr_norm_map = _build_dict(mr_norms, mrs)
 
         # Per-entity-type cache so repeated raw names don't redo the heavy work.
         _SENTINEL = object()
         prod_cache: dict[str, str | None] = {}
         store_cache: dict[str, str | None] = {}
         doc_cache: dict[str, str | None] = {}
+        mr_cache: dict[str, str | None] = {}
 
         def match(
             raw: str | None,
@@ -429,6 +476,7 @@ class ImportService:
         prod_seen = prod_resolved = 0
         store_seen = store_resolved = 0
         doc_seen = doc_resolved = 0
+        mr_seen = mr_resolved = 0
 
         for row in rows:
             r = dict(row)
@@ -453,8 +501,17 @@ class ImportService:
                 if r["medical_store_id"]:
                     store_resolved += 1
 
-            # mr_id is intentionally NOT set here — it is resolved per-row
-            # afterwards via `_resolve_mrs_from_stores`.
+            # MR from the file (Fso/TERRITORY column) when present; otherwise
+            # left None for `_resolve_mrs_from_stores` to fill from allocations.
+            if not r.get("mr_id"):
+                if r.get("mr_name_raw"):
+                    mr_seen += 1
+                r["mr_id"] = match(
+                    r.get("mr_name_raw"), mrs,
+                    mr_upper_map, mr_norm_map, mr_norms, mr_cache,
+                )
+                if r["mr_id"]:
+                    mr_resolved += 1
 
             if not r.get("doctor_id"):
                 if r.get("doctor_name_raw"):
@@ -469,13 +526,14 @@ class ImportService:
             resolved.append(r)
 
         logger.info(
-            "%s fuzzy_resolve: product %d/%d, store %d/%d, doctor %d/%d "
-            "(unique_raw_names: prod=%d store=%d doc=%d)",
+            "%s fuzzy_resolve: product %d/%d, store %d/%d, doctor %d/%d, mr %d/%d "
+            "(unique_raw_names: prod=%d store=%d doc=%d mr=%d)",
             log_prefix,
             prod_resolved, prod_seen,
             store_resolved, store_seen,
             doc_resolved, doc_seen,
-            len(prod_cache), len(store_cache), len(doc_cache),
+            mr_resolved, mr_seen,
+            len(prod_cache), len(store_cache), len(doc_cache), len(mr_cache),
         )
 
         return resolved
@@ -771,6 +829,64 @@ class ImportService:
         )
         return [EntityCandidate(id=str(r[0]), name=r[1]) for r in rows]
 
+    async def _get_all_mrs(self, db: AsyncSession) -> list[EntityCandidate]:
+        """Active users with the MR role — for matching an MR/FOS name read
+        directly from the file (e.g. a 'TERRITORY'/'Fso name' column)."""
+        from app.models.enums import UserRole
+        t0 = time.perf_counter()
+        rows = (
+            await db.execute(
+                select(User.id, User.full_name).where(
+                    User.is_active.is_(True), User.role == UserRole.MR
+                )
+            )
+        ).all()
+        logger.debug(
+            "load_entities mrs: %d rows in %.0fms",
+            len(rows), (time.perf_counter() - t0) * 1000,
+        )
+        return [EntityCandidate(id=str(r[0]), name=r[1]) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Report-month fallback (fill sale_date for dateless monthly summaries)
+    # ------------------------------------------------------------------
+
+    def _apply_report_month(
+        self,
+        rows: list[dict],
+        report_month: str | None,
+        filename: str,
+        *,
+        log_prefix: str = "",
+    ) -> tuple[str | None, int]:
+        """
+        Many distributor reports are monthly summaries with no per-row date —
+        only a period in the title ("From 01/01/2026 …") or in the filename
+        ("JAN-26"). For any row left without a date, stamp the first day of the
+        resolved report month and flag it (`date_estimated`) so the UI can show
+        it's an estimate. Returns (month_used 'YYYY-MM' | None, rows_filled).
+        """
+        month = _resolve_report_month(report_month, filename)
+        if not month:
+            logger.info(
+                "%s apply_report_month: no month determinable (ai=%r file=%r) — "
+                "dateless rows will fail validation",
+                log_prefix, report_month, filename,
+            )
+            return None, 0
+        first_of_month = f"{month}-01"
+        filled = 0
+        for r in rows:
+            if r.get("sale_date") in (None, "", "null"):
+                r["sale_date"] = first_of_month
+                r["date_estimated"] = True
+                filled += 1
+        logger.info(
+            "%s apply_report_month: month=%s filled_dateless=%d/%d",
+            log_prefix, month, filled, len(rows),
+        )
+        return month, filled
+
     # ------------------------------------------------------------------
     # MR resolution (medical store → doctor → active MR allocation)
     # ------------------------------------------------------------------
@@ -804,14 +920,18 @@ class ImportService:
             except (ValueError, AttributeError):
                 return None
 
+        # Only rows that don't already have an MR from the file need a lookup.
         store_ids: set[uuid.UUID] = set()
         for row in rows:
+            if row.get("mr_id"):
+                continue
             if s := _pid(row.get("medical_store_id")):
                 store_ids.add(s)
 
         if not store_ids:
             logger.info(
-                "%s resolve_mrs_from_stores: no medical_store_ids on any row — skipping",
+                "%s resolve_mrs_from_stores: no rows need store-based MR lookup "
+                "(all have a file-supplied MR, or no store) — skipping",
                 log_prefix,
             )
             return []
@@ -857,9 +977,11 @@ class ImportService:
             else:
                 unresolved.add(sid)
 
-        # Apply resolved mr_ids to rows. We override any pre-existing mr_id
-        # because this lookup is now the authoritative source.
+        # Apply resolved mr_ids — but NEVER override an MR already matched from
+        # the file (that is authoritative). Only fill rows still missing one.
         for row in rows:
+            if row.get("mr_id"):
+                continue
             sid = _pid(row.get("medical_store_id"))
             if sid is None:
                 row["mr_id"] = None
@@ -1008,6 +1130,14 @@ class ImportService:
             except (ValueError, AttributeError):
                 return None
 
+        def _to_float(val: object) -> float | None:
+            if val is None or val == "":
+                return None
+            try:
+                return float(str(val).replace(",", "").strip())
+            except (ValueError, TypeError):
+                return None
+
         # ---------- Pass 1: collect ids ----------
         product_ids: set[uuid.UUID] = set()
         store_ids: set[uuid.UUID] = set()
@@ -1090,13 +1220,18 @@ class ImportService:
 
         # ---------- Step B: batch fetch products / stores / doctors ----------
         product_map: dict[uuid.UUID, uuid.UUID] = {}  # product_id -> division_id
+        product_meta: dict[uuid.UUID, tuple] = {}     # product_id -> (ptr, mrp, pack_size)
         if product_ids:
             rs = (
                 await db.execute(
-                    select(Product.id, Product.division_id).where(Product.id.in_(product_ids))
+                    select(
+                        Product.id, Product.division_id,
+                        Product.ptr, Product.mrp, Product.pack_size,
+                    ).where(Product.id.in_(product_ids))
                 )
             ).all()
             product_map = {r[0]: r[1] for r in rs}
+            product_meta = {r[0]: (r[2], r[3], r[4]) for r in rs}
 
         store_map: dict[uuid.UUID, uuid.UUID | None] = {}  # store_id -> headquarter_id
         if store_ids:
@@ -1160,6 +1295,34 @@ class ImportService:
             row["location_id"] = None
             row["headquarter_id"] = str(hq_id) if hq_id else None
             row["state_id"] = str(state_id) if state_id else None
+
+            # ---- runtime-computed values + master fallbacks (not stored cols) ----
+            meta = product_meta.get(pid) if pid else None
+            rate = _to_float(row.get("ptr"))
+            if rate is None and meta is not None:
+                rate = _to_float(meta[0])  # product.ptr
+            sale_qty = _to_float(row.get("sale_qty")) or 0.0
+            free_qty = _to_float(row.get("free_qty")) or 0.0
+            reported = _to_float(row.get("reported_amount"))
+            free_val_raw = _to_float(row.get("free_value_raw"))
+
+            row["sale_value"] = (
+                reported if reported is not None
+                else (round(sale_qty * rate, 2) if rate is not None else None)
+            )
+            row["free_value"] = (
+                free_val_raw if free_val_raw is not None
+                else (round(free_qty * rate, 2) if rate is not None else None)
+            )
+            row["total_amount"] = round(sale_qty * rate, 2) if rate is not None else None
+
+            # Fill display rate / mrp / pack from master when the file omitted them.
+            if not row.get("ptr") and meta is not None:
+                row["ptr"] = _to_float(meta[0])
+            if not row.get("mrp") and meta is not None:
+                row["mrp"] = _to_float(meta[1])
+            if not row.get("pack") and meta is not None and meta[2]:
+                row["pack"] = meta[2]
 
             if division_id:
                 div_filled += 1
@@ -1294,3 +1457,32 @@ class ImportService:
 def _normalize(s: str) -> str:
     """Upper-case, strip non-alphanumeric, collapse whitespace."""
     return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", " ", s.upper())).strip()
+
+
+_MONTH_NAMES = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "MARCH": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "SEPT": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _resolve_report_month(ai_month: str | None, filename: str) -> str | None:
+    """
+    Decide the report month as 'YYYY-MM'. Prefer the month the LLM read from the
+    file's title/header; fall back to the filename (e.g. 'JAN-26', 'MARCH 26').
+    Returns None if neither yields a month.
+    """
+    if ai_month:
+        m = re.fullmatch(r"\s*(\d{4})-(\d{1,2})\s*", str(ai_month))
+        if m and 1 <= int(m.group(2)) <= 12:
+            return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
+
+    up = filename.upper()
+    name_hit = re.search(r"\b(JAN|FEB|MARCH|MAR|APR|MAY|JUN|JUL|AUG|SEPT|SEP|OCT|NOV|DEC)\b", up)
+    year_hit = re.search(r"\b(20\d{2}|\d{2})\b", up.split(name_hit.group(1), 1)[1]) if name_hit else None
+    if name_hit:
+        month = _MONTH_NAMES[name_hit.group(1)]
+        year = 2000 + int(year_hit.group(1)) if (year_hit and len(year_hit.group(1)) == 2) \
+            else (int(year_hit.group(1)) if year_hit else None)
+        if year:
+            return f"{year:04d}-{month:02d}"
+    return None
