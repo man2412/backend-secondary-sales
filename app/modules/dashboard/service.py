@@ -90,6 +90,24 @@ def _previous_window(start: date, end: date, mode: str) -> tuple[date, date]:
     raise ValueError(f"Unsupported growth mode: {mode}")
 
 
+def _label_and_delta_mode(date_from: date, date_to: date) -> tuple[str, str]:
+    """Infer display label and prior-period comparison mode from a date window."""
+    m_start, m_end = _month_window(date_from)
+    if date_from == m_start and date_to == m_end:
+        return date_from.strftime("%B %Y"), "mom"
+
+    q_start, q_end = _quarter_window(date_from)
+    if date_from == q_start and date_to == q_end:
+        q = (date_from.month - 1) // 3 + 1
+        return f"Q{q} {date_from.year}", "qoq"
+
+    y_start, y_end = _year_window(date_from)
+    if date_from == y_start and date_to == y_end:
+        return str(date_from.year), "yoy"
+
+    return f"{date_from.isoformat()} – {date_to.isoformat()}", "yoy"
+
+
 def _label_for_trend(period_key_iso: str, bucket: str) -> str:
     """Turn the ISO string from `date_trunc` (e.g. '2026-04-01 00:00:00') into a label."""
     try:
@@ -165,13 +183,20 @@ class DashboardService:
         caller: User,
         *,
         scope_user_id: uuid.UUID | None,
+        date_from: date | None = None,
+        date_to: date | None = None,
         today: date | None = None,
         filters: DashboardFilters | None = None,
     ) -> DashboardOverview:
+        if (date_from is None) ^ (date_to is None):
+            raise ValueError("date_from and date_to must both be provided or both omitted")
+        if date_from is not None and date_to is not None and date_from > date_to:
+            raise ValueError("date_from must be on or before date_to")
+
         scope = await self._resolve_scope(db, caller, scope_user_id)
         mr_ids = await self._mr_ids_for_scope(db, scope)
         flt = filters or DashboardFilters()
-        ref = today or date.today()
+        ref = date_to or today or date.today()
 
         yearly = await self._period_totals(db, mr_ids, *_year_window(ref), "yoy", flt, "Yearly")
         quarterly = await self._period_totals(
@@ -180,10 +205,19 @@ class DashboardService:
         monthly = await self._period_totals(
             db, mr_ids, *_month_window(ref), "mom", flt, "Monthly"
         )
+
+        selected: PeriodTotals | None = None
+        if date_from is not None and date_to is not None:
+            label, delta_mode = _label_and_delta_mode(date_from, date_to)
+            selected = await self._period_totals(
+                db, mr_ids, date_from, date_to, delta_mode, flt, label
+            )
+
         return DashboardOverview(
             scope_user_id=scope.id,
             scope_user_name=scope.full_name,
             scope_user_role=scope.role,
+            selected=selected,
             yearly=yearly,
             quarterly=quarterly,
             monthly=monthly,

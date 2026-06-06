@@ -40,6 +40,10 @@ class DashboardOverview(BaseModel):
     scope_user_id: uuid.UUID
     scope_user_name: str
     scope_user_role: UserRole
+    selected: PeriodTotals | None = Field(
+        default=None,
+        description="Totals for the requested date_from/date_to window (when provided).",
+    )
     yearly: PeriodTotals
     quarterly: PeriodTotals
     monthly: PeriodTotals

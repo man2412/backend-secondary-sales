@@ -83,6 +83,8 @@ def _map_errors(exc: Exception) -> HTTPException:
 async def dashboard_overview(
     db: Annotated[AsyncSession, Depends(get_db)],
     current: Annotated[User, Depends(get_current_user)],
+    date_from: Annotated[_QDate | None, Query(description="Start of the selected KPI window (inclusive)")] = None,
+    date_to: Annotated[_QDate | None, Query(description="End of the selected KPI window (inclusive)")] = None,
     scope_user_id: Annotated[UUID | None, Query(description="Drill into a subordinate; defaults to caller")] = None,
     state_id: Annotated[UUID | None, Query()] = None,
     headquarter_id: Annotated[UUID | None, Query()] = None,
@@ -97,12 +99,18 @@ async def dashboard_overview(
     Returns yearly, quarterly and monthly totals (with previous-period delta %)
     for the caller's reporting subtree, or for a specific subordinate when
     `scope_user_id` is provided.
+
+    When `date_from` and `date_to` are supplied, the response also includes
+    `selected` — totals for that window with delta vs the prior comparable
+    period (month, quarter, or year).
     """
     try:
         out = await DashboardService().overview(
             db,
             current,
             scope_user_id=scope_user_id,
+            date_from=date_from,
+            date_to=date_to,
             filters=_build_filters(
                 state_id=state_id,
                 headquarter_id=headquarter_id,
