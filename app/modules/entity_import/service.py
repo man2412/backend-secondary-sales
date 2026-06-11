@@ -114,6 +114,7 @@ class EntityImportService:
             doctors=EntityImportCounts(),
             doctor_store_links=EntityImportCounts(),
             mr_doctor_allocations=EntityImportCounts(),
+            mr_headquarter_allocations=EntityImportCounts(),
         )
 
         if not rows:
@@ -212,9 +213,12 @@ class EntityImportService:
             uploaded_by=uploaded_by, summary=summary,
         )
         logger.info(
-            "%s phase5b mr_doctor_allocs: created=%d existing=%d elapsed_ms=%.0f",
+            "%s phase5b mr_doctor_allocs: created=%d existing=%d | "
+            "phase5c mr_hq_allocs: created=%d existing=%d elapsed_ms=%.0f",
             prefix, summary.mr_doctor_allocations.inserted,
             summary.mr_doctor_allocations.matched_existing,
+            summary.mr_headquarter_allocations.inserted,
+            summary.mr_headquarter_allocations.matched_existing,
             (time.perf_counter() - t) * 1000,
         )
 
@@ -822,8 +826,13 @@ class EntityImportService:
         for u in mrs:
             mr_by_norm[_fso_key(u.full_name)].append(u)
 
-        # Build (mr_id, doctor_id) pairs we want active.
+        # Build (mr_id, doctor_id) pairs we want active. Also build the set of
+        # (mr_id, headquarter_id) allocations implied by each matched doctor's HQ
+        # — allocating a doctor to an MR also gives that MR a presence in the
+        # doctor's headquarter, which downstream sales import needs to resolve
+        # HQ/state/division.
         wanted: set[tuple[uuid.UUID, uuid.UUID]] = set()
+        wanted_hq: set[tuple[uuid.UUID, uuid.UUID]] = set()
         # Track warned-names so we don't emit the same warning per-row.
         warned_unknown: set[str] = set()
         warned_ambiguous: set[str] = set()
@@ -838,19 +847,43 @@ class EntityImportService:
                 continue
             candidates = mr_by_norm.get(fso_norm, [])
             if not candidates:
+                # Auto-create a placeholder MR user (random email/supabase_id) so
+                # the allocation proceeds instead of being skipped. The new user
+                # is cached so later rows with the same FSO reuse it.
+                try:
+                    new_mr = await self._repo.insert_mr_user(db, full_name=r.fso_name or fso_norm)
+                except Exception as exc:
+                    logger.exception(
+                        "phase5b: failed to auto-create MR user for %r", r.fso_name
+                    )
+                    if fso_norm not in warned_unknown:
+                        summary.warnings.append(
+                            EntityImportWarning(
+                                row_index=r.row_index,
+                                kind="unknown_mr",
+                                message=(
+                                    f"FSO/MR {r.fso_name!r} not found and auto-create "
+                                    f"failed ({exc}) — doctor allocation skipped."
+                                ),
+                            )
+                        )
+                        warned_unknown.add(fso_norm)
+                    continue
+                mr_by_norm[fso_norm] = [new_mr]
+                candidates = [new_mr]
                 if fso_norm not in warned_unknown:
+                    # No row_index → informational only; does not mark rows skipped.
                     summary.warnings.append(
                         EntityImportWarning(
-                            row_index=r.row_index,
-                            kind="unknown_mr",
+                            kind="created_mr",
                             message=(
-                                f"FSO/MR {r.fso_name!r} not found among active users with role=MR — "
-                                "doctor allocation skipped."
+                                f"FSO/MR {r.fso_name!r} had no matching user — created a "
+                                f"placeholder MR ({new_mr.email}). Set its real email / "
+                                "details and headquarter via the user admin later."
                             ),
                         )
                     )
                     warned_unknown.add(fso_norm)
-                continue
             if len(candidates) > 1:
                 if fso_norm not in warned_ambiguous:
                     names = ", ".join(sorted({c.email for c in candidates}))
@@ -866,7 +899,10 @@ class EntityImportService:
                     )
                     warned_ambiguous.add(fso_norm)
                 continue
-            wanted.add((candidates[0].id, doctor.id))
+            mr_id = candidates[0].id
+            wanted.add((mr_id, doctor.id))
+            if doctor.headquarter_id is not None:
+                wanted_hq.add((mr_id, doctor.headquarter_id))
 
         if not wanted:
             return
@@ -892,3 +928,29 @@ class EntityImportService:
         ]
         await self._repo.bulk_upsert_mr_doctor_allocations(db, rows=upsert_rows)
         summary.mr_doctor_allocations.inserted = len(new_pairs)
+
+        # ------------------------------------------------------------------
+        # Phase 5c: MR ↔ Headquarter allocations (derived from doctors' HQs)
+        # ------------------------------------------------------------------
+        if not wanted_hq:
+            return
+        existing_hq = await self._repo.list_existing_mr_hq_pairs(
+            db, {p[0] for p in wanted_hq}
+        )
+        new_hq_pairs = [p for p in wanted_hq if p not in existing_hq]
+        summary.mr_headquarter_allocations.matched_existing = (
+            len(wanted_hq) - len(new_hq_pairs)
+        )
+        if new_hq_pairs:
+            hq_rows = [
+                {
+                    "id": uuid.uuid4(),
+                    "mr_id": mid,
+                    "headquarter_id": hid,
+                    "allocated_by": uploaded_by,
+                    "is_active": True,
+                }
+                for mid, hid in new_hq_pairs
+            ]
+            await self._repo.bulk_insert_mr_headquarter_allocations(db, rows=hq_rows)
+            summary.mr_headquarter_allocations.inserted = len(new_hq_pairs)

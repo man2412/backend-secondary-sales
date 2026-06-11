@@ -421,6 +421,8 @@ class ImportService:
             norm_map: dict[str, str],
             norms: list[str],
             cache: dict[str, str | None],
+            *,
+            strict: bool = False,
         ) -> str | None:
             if not raw or not candidates:
                 return None
@@ -444,6 +446,13 @@ class ImportService:
                 if hit is not None:
                     cache[raw] = hit
                     return hit
+
+            # strict mode (people / MRs): exact + normalized-exact ONLY. Looser
+            # matching wrongly maps a sheet FSO like 'JAYESHVAGHASIA' onto an
+            # unrelated user 'Jayesh Gandhi'. Never guess a person's identity.
+            if strict:
+                cache[raw] = None
+                return None
 
             # Level 3: substring containment on normalized form
             if rn:
@@ -509,6 +518,7 @@ class ImportService:
                 r["mr_id"] = match(
                     r.get("mr_name_raw"), mrs,
                     mr_upper_map, mr_norm_map, mr_norms, mr_cache,
+                    strict=True,
                 )
                 if r["mr_id"]:
                     mr_resolved += 1
@@ -561,6 +571,19 @@ class ImportService:
             "%s commit_job: starting confirmed_rows=%d committed_by=%s",
             prefix, len(confirmed_rows), str(committed_by.id)[:8],
         )
+
+        # Re-apply the report-month fallback before re-validating. The synthesized
+        # date is set at preview time, but the client may round-trip the rows with
+        # the date field still empty for records that had none in the file — without
+        # this, those rows would fail validation here and silently never commit.
+        _, recommitted_dates = self._apply_report_month(
+            confirmed_rows, None, job.filename, log_prefix=prefix,
+        )
+        if recommitted_dates:
+            logger.info(
+                "%s commit_job: re-filled %d dateless row(s) from report month",
+                prefix, recommitted_dates,
+            )
 
         t_step = time.perf_counter()
         validated = await validate_rows(db, confirmed_rows, log_prefix=prefix)
@@ -717,8 +740,8 @@ class ImportService:
                 "location_id": location_id,
                 "state_id": state_id,
                 "sale_date": sale_date,
-                "sale_qty": int(row["sale_qty"]),
-                "free_qty": int(row.get("free_qty") or 0),
+                "sale_qty": float(row["sale_qty"]),
+                "free_qty": float(row.get("free_qty") or 0),
                 "ptr": ptr,
                 "pts": pts,
                 "mrp": mrp,

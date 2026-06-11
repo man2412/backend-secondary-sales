@@ -48,6 +48,7 @@ class EntityImportSummary(BaseModel):
     doctors: EntityImportCounts
     doctor_store_links: EntityImportCounts
     mr_doctor_allocations: EntityImportCounts
+    mr_headquarter_allocations: EntityImportCounts
 
     merged_store_groups: list[StoreMergeRecord] = Field(default_factory=list)
     warnings: list[EntityImportWarning] = Field(default_factory=list)

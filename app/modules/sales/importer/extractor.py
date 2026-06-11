@@ -134,6 +134,35 @@ def extract_xlsx(content: bytes, *, log_prefix: str = "") -> ExtractionResult:
     return res
 
 
+def _is_pivot_sheet(rows: list[list[str]]) -> bool:
+    """
+    Detect a PivotTable / summary / flat-re-export sheet that DUPLICATES the
+    real per-customer detail sheet. Importing these double-counts the data,
+    drags in floating-point artifacts (e.g. 12.999538958045182), and produces
+    customer-less rows. Two signatures (both safe — a genuine detail sheet has
+    neither):
+
+      1. Excel PivotTable header: "Row Labels" + "Sum of …".
+      2. Pivot data-source / flat dump: a normal "Qty" column AND a duplicate
+         "SALE QTY" (/"SALE FREE QTY") column. A real detail sheet has ONE
+         quantity column; files like RKMA use only "Sale Qty" (no plain "Qty"),
+         so they are not affected.
+    """
+    for row in rows[:15]:
+        cells = [c.strip().lower() for c in row if c and c.strip()]
+        if not cells:
+            continue
+        if any(c == "row labels" for c in cells) and any(c.startswith("sum of") for c in cells):
+            return True
+        has_qty = "qty" in cells
+        has_sale_qty = any(
+            c in ("sale qty", "saleqty", "sale free qty", "sale free q") for c in cells
+        )
+        if has_qty and has_sale_qty:
+            return True
+    return False
+
+
 def _collect_sheets_openpyxl(wb) -> list[tuple[str, list[list[str]]]]:
     sheets: list[tuple[str, list[list[str]]]] = []
     for ws in wb.worksheets:
@@ -141,8 +170,12 @@ def _collect_sheets_openpyxl(wb) -> list[tuple[str, list[list[str]]]]:
             [("" if c is None else str(c)) for c in row]
             for row in ws.iter_rows(values_only=True)
         ]
-        if any(any(c.strip() for c in r) for r in rows):
-            sheets.append((ws.title, rows))
+        if not any(any(c.strip() for c in r) for r in rows):
+            continue
+        if _is_pivot_sheet(rows):
+            logger.info("extract: skipping pivot/summary sheet %r", ws.title)
+            continue
+        sheets.append((ws.title, rows))
     return sheets
 
 
@@ -152,18 +185,38 @@ def _collect_sheets_openpyxl(wb) -> list[tuple[str, list[list[str]]]]:
 
 def extract_xls(content: bytes, *, log_prefix: str = "") -> ExtractionResult:
     import xlrd
+    from xlrd.xldate import xldate_as_datetime
 
     t0 = time.perf_counter()
     wb = xlrd.open_workbook(file_contents=content)
+
+    def _cell(ws, r: int, c: int) -> str:
+        # Date cells in .xls are stored as serial numbers; xlrd returns the raw
+        # float (e.g. 46058). Convert to an ISO date string so the LLM/validator
+        # see a real date, not "46058". Non-date cells fall through unchanged.
+        if ws.cell_type(r, c) == xlrd.XL_CELL_DATE:
+            try:
+                dt = xldate_as_datetime(ws.cell_value(r, c), wb.datemode)
+                if (dt.hour, dt.minute, dt.second) == (0, 0, 0):
+                    return dt.strftime("%Y-%m-%d")
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:  # noqa: BLE001
+                pass
+        return _xls_cell_str(ws.cell_value(r, c))
+
     sheets: list[tuple[str, list[list[str]]]] = []
     for si in range(wb.nsheets):
         ws = wb.sheet_by_index(si)
         rows = [
-            [_xls_cell_str(ws.cell_value(r, c)) for c in range(ws.ncols)]
+            [_cell(ws, r, c) for c in range(ws.ncols)]
             for r in range(ws.nrows)
         ]
-        if any(any(c.strip() for c in r) for r in rows):
-            sheets.append((ws.name, rows))
+        if not any(any(c.strip() for c in r) for r in rows):
+            continue
+        if _is_pivot_sheet(rows):
+            logger.info("extract: skipping pivot/summary sheet %r", ws.name)
+            continue
+        sheets.append((ws.name, rows))
     res = _sheets_to_result(sheets)
     logger.info(
         "%s extract_xls: sheets_with_data=%d rows_out=%s fos_detected=%s elapsed_ms=%.0f",

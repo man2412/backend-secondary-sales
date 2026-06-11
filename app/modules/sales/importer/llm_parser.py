@@ -55,6 +55,33 @@ _COLUMNS = [
     "free_value_raw",     # 13 value of free goods if a separate column exists
 ]
 
+# The LLM now returns named-key OBJECTS (not positional arrays), which removes the
+# whole class of "value landed in the wrong slot" bugs. This maps the model's keys
+# (and a few common aliases / the internal names themselves) → internal fields.
+_KEY_ALIASES = {
+    "product_name": "product_name_raw", "product": "product_name_raw",
+    "item": "product_name_raw", "product_name_raw": "product_name_raw",
+    "sale_date": "sale_date", "date": "sale_date",
+    "sale_qty": "sale_qty", "qty": "sale_qty", "quantity": "sale_qty", "sales": "sale_qty",
+    "free_qty": "free_qty", "free": "free_qty", "f_qty": "free_qty",
+    "mrp": "mrp",
+    "rate": "ptr", "ptr": "ptr", "sale_rate": "ptr",
+    "amount": "reported_amount", "value": "reported_amount",
+    "sale_value": "reported_amount", "reported_amount": "reported_amount",
+    "free_value": "free_value_raw", "fr_value": "free_value_raw",
+    "free_amount": "free_value_raw", "free_value_raw": "free_value_raw",
+    "bill_ref": "bill_ref", "bill": "bill_ref", "bill_no": "bill_ref",
+    "invoice": "bill_ref", "inv_no": "bill_ref",
+    "batch": "batch", "batch_no": "batch",
+    "pack": "pack", "packing": "pack",
+    "customer_name": "customer_name_raw", "customer": "customer_name_raw",
+    "party": "customer_name_raw", "customer_name_raw": "customer_name_raw",
+    "mr_name": "mr_name_raw", "mr": "mr_name_raw", "fso": "mr_name_raw",
+    "fso_name": "mr_name_raw", "territory": "mr_name_raw", "mr_name_raw": "mr_name_raw",
+    "doctor_name": "doctor_name_raw", "doctor": "doctor_name_raw",
+    "dr_name": "doctor_name_raw", "doctor_name_raw": "doctor_name_raw",
+}
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -97,53 +124,69 @@ month for the same distributor. Read the content intelligently and map it to the
 fixed schema below. Never assume a specific column order — identify each column by
 its header text and the kind of values beneath it.
 
-Return JSON: {"report_month": "YYYY-MM" | null, "rows": [[col0..col13], ...]}
+Return JSON: {"report_month": "YYYY-MM" | null, "rows": [ {row-object}, ... ]}
 
 report_month — the month the report covers, as YYYY-MM. Read it from the title or
 header text (e.g. "From: 01/01/2026 To: 31/01/2026", "JAN-26", "Sales Report Jan
 2026"). It is used as the sale month for rows that have no own date. null only if
 truly indeterminable.
 
-Each row = EXACTLY 14 values, in THIS order regardless of the file's own order:
-  0  product_name  exact product/item name. If a continuation row leaves it blank
-                   but clearly belongs to the product above (different batch /
-                   invoice), carry the product name down.
-  1  sale_date     that row's date as YYYY-MM-DD. null if the file has NO per-row
-                   date column (many monthly summaries don't). Do NOT invent one.
-  2  sale_qty      quantity SOLD (paid). Synonyms: Qty, Sale Qty, SaleQty, Sales.
-                   Numeric; negative for sale-returns. This is NOT "Total Qty"
-                   (total = sale + free) and NOT the free column.
-                   DISAMBIGUATION (important): if there are two quantity-like
-                   columns, ARITHMETIC decides which is sale_qty — pick the column
-                   whose value × rate ≈ the row Amount; the other is free_qty.
-                   This OVERRIDES the column's name. Worked example — a row with
-                   "Qty=10, S.Qty=2, S.Rate=37.5, Amount=375.0": because
-                   10 × 37.5 = 375, sale_qty=10 and free_qty=2 (here "S. Qty" is
-                   the scheme/free column, NOT the sold qty, despite its name).
-  3  free_qty      FREE / scheme quantity. Synonyms: Free, F.Qty, Fqty, Free Qty,
-                   F. Qty, Fee, Sch Qty, S. Qty, FREE QTY. 0 if absent.
-  4  mrp           MRP. null if absent.
-  5  ptr           selling rate per unit. Synonyms: Rate, Sale Rate, S. Rate, PTR.
-                   null if absent.
-  6  sale_value    the sale line amount/total. Synonyms: Amount, Value, Sale
-                   Amount, NetSales, FinalAmt, Total Value. null if absent.
-  7  bill_ref      bill/invoice/challan no. Synonyms: BillRef, InvNo, Bill No,
-                   Invoice No, Chalan No. null if absent.
-  8  batch         batch / lot no. null if absent.
-  9  pack          pack size/form e.g. "10 TAB", "1X10". null if absent.
-  10 customer_name the PARTY / medical store / dealer the sale is to. null if absent.
-  11 mr_name       field officer / MR / sales rep. Synonyms: FSO, Fso name, MR,
-                   Rep, SalesMan, TERRITORY. null if absent.
-  12 doctor_name   the doctor. Synonyms: Dr name, DR NAME, RXBER. The value
-                   "GENERAL" means no doctor — emit null for it. null if absent.
-  13 free_value    value of the free goods, only if a separate column exists.
-                   Synonyms: Fr.Value, Free Amount, FrQty Amt. null if absent.
+Each row is a JSON OBJECT keyed by FIELD NAME (not position). Include a key only
+when the file has a value for it; omit it or use null otherwise. Because values
+are keyed by name, map each column to its MEANING regardless of the file's column
+order or how many columns it has — a value can never go in the "wrong slot".
+Keys:
+  "product_name"  exact product/item name. If a continuation row leaves it blank
+                  but clearly belongs to the product above (different batch /
+                  invoice), carry the product name down.
+  "sale_date"     that row's date as YYYY-MM-DD. Omit if the file has NO per-row
+                  date column (many monthly summaries don't). Do NOT invent one.
+  "sale_qty"      quantity SOLD (paid). Synonyms: Qty, Sale Qty, SaleQty, Sales.
+                  Numeric; NEGATIVE for sale-returns; MAY be fractional (e.g. 2.5).
+                  This is NOT "Total Qty" (= sale + free) and NOT the free column.
+                  DISAMBIGUATION: if there are two quantity-like columns, ARITHMETIC
+                  decides — the column whose value × rate ≈ amount is sale_qty; the
+                  other is free_qty. This OVERRIDES the column's name (e.g. a
+                  "Qty=10, S.Qty=2, Rate=37.5, Amount=375" row → sale_qty=10,
+                  free_qty=2, because 10×37.5=375).
+  "free_qty"      FREE / scheme quantity. Synonyms: Free, F.Qty, Fqty, F. Qty, Fee,
+                  Sch Qty, S. Qty, FREE QTY. 0 if absent. May be fractional (0.5).
+  "mrp"           MRP (per-unit price). null if absent.
+  "rate"          selling rate per unit. Synonyms: Rate, Sale Rate, S. Rate, PTR.
+  "amount"        the sale LINE total (≈ qty × rate). Synonyms: Amount, Value, Sale
+                  Amount, NetSales, FinalAmt, Total Value. This is NOT a per-unit
+                  price — keep it separate from "mrp" and "rate". A file with a
+                  single money column maps it to "amount".
+  "free_value"    value of the free goods, only if a separate column exists.
+                  Synonyms: Fr.Value, Free Amount, FrQty Amt.
+  "bill_ref"      bill / invoice / challan no. Synonyms: BillRef, InvNo, Bill No.
+  "batch"         batch / lot no.
+  "pack"          pack size/form e.g. "10 TAB", "1X10".
+  "customer_name" the PARTY / medical store / dealer the sale is to.
+  "mr_name"       field officer / MR / sales rep. Synonyms: FSO, Fso name, MR, Rep,
+                  SalesMan, TERRITORY.
+  "doctor_name"   the doctor. Synonyms: Dr name, DR NAME, RXBER. "GENERAL" → null.
+
+Example row object:
+  {"product_name": "APTIGLIM M2 SR TAB", "sale_qty": 5, "free_qty": 1,
+   "rate": 64.18, "amount": 320.9, "bill_ref": "CA-T/28305", "batch": "CGX03AGA",
+   "pack": "10 TAB", "customer_name": "SHIV MEDICARE", "sale_date": "2026-01-15"}
 
 Structure rules — handle ALL of these layouts:
 - The customer/party may be (a) an inline column on every row, OR (b) a SECTION
   HEADER that introduces a block — e.g. "Party: ABC STORE [CITY]", a standalone
-  bold name line, or a `<td colspan=...>NAME, CITY</td>` row. In case (b), apply
-  that customer to EVERY following data row until the next section header.
+  bold name line, a `<td colspan=...>NAME, CITY</td>` row, OR (very common in
+  spreadsheets) a row whose FIRST column holds a store/party name while the
+  Qty/Free/Amount columns are EMPTY (often with just a city/area in another
+  column, e.g. "DAWA ZONE MEDICAL & FOODS , , , JAMNAGAR"). Such a name-only row
+  is a CUSTOMER section header — NOT a product — and its customer_name applies to
+  EVERY following data row until the next section header. Each product line under
+  it (which DOES have a qty/amount) must carry that customer_name.
+  If the section header spans MULTIPLE lines — a party NAME line followed by an
+  ADDRESS line (street / road / building / room / plot / shop-no / city, e.g.
+  "MKT-2303.ROOM-1.…, COLLEGE RD.BILIMOR") — use the NAME line as customer_name
+  and IGNORE the address line. The name often carries a leading account code
+  (e.g. "3619 KAIZENS …"); keep the full name line as-is, code included.
 - mr_name and doctor_name may likewise appear once on a section row or a
   "Party Total" row rather than on each data row — apply them to that party's rows.
 - One cell may merge two fields (e.g. "MRP Batch" = "84.23 CGX03"; or "Qty Free" /
@@ -157,6 +200,9 @@ Structure rules — handle ALL of these layouts:
   use comma thousand-separators — parse as plain decimals.
 - Negative quantities = sale-returns (bill refs often contain "SR") — keep them
   negative; do NOT drop or flip them.
+- A file may have FEWER columns than these keys (e.g. only Item, Qty, F.Qty,
+  Amount). Just emit the keys you have values for and omit the rest — order and
+  count don't matter since rows are keyed by name.
 - Do NOT invent data. Only extract what is present; leave unknown fields null.\
 """
 
@@ -1073,8 +1119,14 @@ def _rows_to_dicts(raw_rows: list) -> list[dict]:
     for row in raw_rows:
         d: dict | None = None
         if isinstance(row, dict):
-            d = dict(row)
+            # Named-object output: map the model's keys → internal field names.
+            d = {}
+            for k, v in row.items():
+                internal = _KEY_ALIASES.get(str(k).strip().lower())
+                if internal and (internal not in d or d[internal] in (None, "")):
+                    d[internal] = v
         elif isinstance(row, (list, tuple)):
+            # Legacy positional-array fallback (kept for safety).
             d = {}
             for i, col in enumerate(_COLUMNS):
                 d[col] = row[i] if i < len(row) else None
@@ -1211,14 +1263,6 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
                         detected_fos_name=effective_req.detected_fos_name,
                         log_prefix=log_prefix,
                     )
-                    pre_dedupe_count = len(raw_rows)
-                    raw_rows, removed = _dedupe_rows(raw_rows)
-                    if removed:
-                        logger.info(
-                            "%s parse_with_llm: dedupe removed %d duplicate row(s) "
-                            "across chunks (kept %d)",
-                            log_prefix, removed, len(raw_rows),
-                        )
                     model_used = _GEMINI_MODEL
             else:
                 raw, model_used = _call_gemini(effective_req)
@@ -1255,6 +1299,18 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
                 f"Gemini call failed: {type(_gemini_error).__name__}: {_gemini_error}"
             ) from _gemini_error
         raise RuntimeError("LLM call returned no model_used (unknown reason)")
+
+    # Dedupe across ALL paths (single-call tabular/PDF + chunked). The model
+    # occasionally emits the same invoice line twice; without this it inflates
+    # qty/amount. Conservative: only drops a row when its full identity
+    # (date, customer, product, qty, bill_ref) is present and matches exactly.
+    pre_dedupe_count = len(raw_rows)
+    raw_rows, removed = _dedupe_rows(raw_rows)
+    if removed:
+        logger.info(
+            "%s parse_with_llm: dedupe removed %d duplicate row(s) (kept %d)",
+            log_prefix, removed, len(raw_rows),
+        )
 
     rows = _rows_to_dicts(raw_rows)
 
