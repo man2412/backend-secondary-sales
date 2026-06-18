@@ -274,31 +274,15 @@ class ImportService:
             prefix, (time.perf_counter() - t_step) * 1000,
         )
 
-        # 7. Up-front allocation warning so user sees it at preview, not after commit
-        t_step = time.perf_counter()
-        mr_ids_in_rows: set[uuid.UUID] = set()
-        for r in validated:
-            if r.get("mr_id"):
-                try:
-                    mr_ids_in_rows.add(uuid.UUID(r["mr_id"]))
-                except ValueError:
-                    pass
-        mrs_without_alloc = await self._find_mrs_without_allocations(db, mr_ids_in_rows)
-        # Order: chunk-level failures first (most actionable — user can re-upload),
-        # then MR-resolution issues, then allocation issues.
+        # 7. Assemble warnings (chunk failures first, then MR-resolution issues).
+        #    NOTE: we deliberately no longer warn that "MR X has no headquarter
+        #    allocation — rows will be skipped". headquarter/state/division are
+        #    now derived from the medical store (see _enrich_derived_fields), NOT
+        #    from the MR's HQ allocation, so those rows DO commit. That old
+        #    warning was a false alarm. Genuinely non-committable rows (missing
+        #    product/store/MR or an underivable HQ chain) are surfaced per-row by
+        #    the validator and by commit_job's skipped_rows.
         warnings: list[str] = list(resp.warnings) + list(mr_resolution_warnings)
-        if mrs_without_alloc:
-            names = await self._get_user_names(db, mrs_without_alloc)
-            warnings.append(
-                "The following MR(s) have no active headquarter allocations — "
-                "commits for their rows will be skipped: " + ", ".join(names)
-            )
-        logger.info(
-            "%s step7 alloc_check: distinct_mrs_in_rows=%d mrs_without_alloc=%d "
-            "elapsed_ms=%.0f",
-            prefix, len(mr_ids_in_rows), len(mrs_without_alloc),
-            (time.perf_counter() - t_step) * 1000,
-        )
 
         # 8. Persist — with loud failure signalling. "Extracted nothing" or
         #    "nothing committable" must NEVER masquerade as a silent 'ready'.

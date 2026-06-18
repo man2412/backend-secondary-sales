@@ -136,9 +136,12 @@ when the file has a value for it; omit it or use null otherwise. Because values
 are keyed by name, map each column to its MEANING regardless of the file's column
 order or how many columns it has — a value can never go in the "wrong slot".
 Keys:
-  "product_name"  exact product/item name. If a continuation row leaves it blank
-                  but clearly belongs to the product above (different batch /
-                  invoice), carry the product name down.
+  "product_name"  the specific drug / ITEM name (e.g. "APTIGLIM M1 PR TAB"),
+                  NOT a manufacturer / company / division name (e.g.
+                  "APTUS CD CARE", "… DIVI", "MF: …"). If a row carries BOTH a
+                  manufacturer/division and an item, use the ITEM. If a
+                  continuation row leaves it blank but clearly belongs to the
+                  product above (different batch / invoice), carry it down.
   "sale_date"     that row's date as YYYY-MM-DD. Omit if the file has NO per-row
                   date column (many monthly summaries don't). Do NOT invent one.
   "sale_qty"      quantity SOLD (paid). Synonyms: Qty, Sale Qty, SaleQty, Sales.
