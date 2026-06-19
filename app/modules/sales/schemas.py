@@ -25,8 +25,8 @@ class SecondarySaleOut(BaseModel):
     location_id: uuid.UUID | None = None
     state_id: uuid.UUID
     sale_date: date
-    sale_qty: int
-    free_qty: int
+    sale_qty: float
+    free_qty: float
     ptr: float
     pts: float | None
     mrp: float
@@ -52,8 +52,8 @@ class SecondarySaleCreate(BaseModel):
     headquarter_id: uuid.UUID
     location_id: uuid.UUID | None = None
     sale_date: date
-    sale_qty: int = Field(..., ge=1)
-    free_qty: int = Field(default=0, ge=0)
+    sale_qty: float = Field(..., gt=0)
+    free_qty: float = Field(default=0, ge=0)
     special_price: float | None = Field(
         default=None,
         ge=0,
@@ -63,8 +63,8 @@ class SecondarySaleCreate(BaseModel):
 
 
 class SecondarySaleUpdate(BaseModel):
-    sale_qty: int | None = Field(None, ge=0)
-    free_qty: int | None = Field(None, ge=0)
+    sale_qty: float | None = Field(None, gt=0)
+    free_qty: float | None = Field(None, ge=0)
     special_price: float | None = Field(
         None,
         ge=0,

@@ -13,14 +13,15 @@ Naming convention:
 """
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Iterable, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.allocation import MrDoctorAllocation
+from app.models.allocation import MrDoctorAllocation, MrHeadquarterAllocation
 from app.models.doctor import Doctor, DoctorMedicalStore
 from app.models.enums import UserRole
 from app.models.master import Division, Headquarter, State
@@ -250,6 +251,28 @@ class EntityImportRepository:
         )
         return r.scalars().all()
 
+    async def insert_mr_user(self, db: AsyncSession, *, full_name: str) -> User:
+        """
+        Create a placeholder active MR user for an FSO/MR name that appears in
+        an import sheet but has no matching user yet. `supabase_id` and `email`
+        are randomised to satisfy the NOT-NULL/UNIQUE constraints — there is no
+        real auth identity behind this row; an admin can reconcile it later.
+        """
+        clean_name = " ".join((full_name or "").split()) or "Unknown MR"
+        slug = re.sub(r"[^a-z0-9]+", "-", clean_name.lower()).strip("-") or "mr"
+        email = f"{slug[:40]}+{uuid.uuid4().hex[:12]}@imported.invalid"
+        row = User(
+            supabase_id=uuid.uuid4(),
+            full_name=clean_name,
+            email=email,
+            role=UserRole.MR,
+            is_active=True,
+        )
+        db.add(row)
+        await db.flush()
+        await db.refresh(row)
+        return row
+
     # ---- MR ↔ Doctor allocations -----------------------------------------
 
     async def list_existing_mr_doctor_pairs(
@@ -288,6 +311,54 @@ class EntityImportRepository:
                 "is_active": True,
                 "allocated_by": stmt.excluded.allocated_by,
             },
+        )
+        result = await db.execute(stmt)
+        return int(result.rowcount or 0)
+
+    # ---- MR ↔ Headquarter allocations ------------------------------------
+
+    async def list_existing_mr_hq_pairs(
+        self,
+        db: AsyncSession,
+        mr_ids: Iterable[uuid.UUID],
+    ) -> set[tuple[uuid.UUID, uuid.UUID]]:
+        """Return the set of (mr_id, headquarter_id) pairs that already have an
+        ACTIVE allocation (matching the partial unique index)."""
+        ids = [m for m in mr_ids if m is not None]
+        if not ids:
+            return set()
+        r = await db.execute(
+            select(
+                MrHeadquarterAllocation.mr_id,
+                MrHeadquarterAllocation.headquarter_id,
+            ).where(
+                MrHeadquarterAllocation.mr_id.in_(ids),
+                MrHeadquarterAllocation.is_active.is_(True),
+            )
+        )
+        return {(row[0], row[1]) for row in r.all()}
+
+    async def bulk_insert_mr_headquarter_allocations(
+        self,
+        db: AsyncSession,
+        *,
+        rows: list[dict],
+    ) -> int:
+        """
+        Insert (mr_id, headquarter_id, allocated_by) allocations idempotently.
+        The table enforces active-only uniqueness via the partial unique index
+        `uq_mr_headquarter_active` (WHERE is_active = true), so the conflict
+        target must name those index columns + predicate. Returns rows inserted.
+        """
+        if not rows:
+            return 0
+        stmt = (
+            pg_insert(MrHeadquarterAllocation.__table__)
+            .values(rows)
+            .on_conflict_do_nothing(
+                index_elements=["mr_id", "headquarter_id"],
+                index_where=text("is_active = true"),
+            )
         )
         result = await db.execute(stmt)
         return int(result.rowcount or 0)

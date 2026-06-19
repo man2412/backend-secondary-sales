@@ -40,19 +40,47 @@ logger = logging.getLogger(__name__)
 
 _COLUMNS = [
     "product_name_raw",   # 0  exact product name string from the file
-    "sale_date",          # 1  YYYY-MM-DD
-    "sale_qty",           # 2  integer
+    "sale_date",          # 1  YYYY-MM-DD (null if the file has no per-row date)
+    "sale_qty",           # 2  integer — quantity SOLD (not "Total Qty")
     "free_qty",           # 3  integer (0 if absent)
     "mrp",                # 4  decimal
     "ptr",                # 5  decimal Rate / selling price
-    "reported_amount",    # 6  decimal Amount / Value total
+    "reported_amount",    # 6  decimal Amount / Value / Sale-value total
     "bill_ref",           # 7  bill/invoice reference string
     "batch",              # 8  batch number
     "pack",               # 9  pack size/form  e.g. "1X10TA"
     "customer_name_raw",  # 10 exact party/store name from file
-    "mr_name_raw",        # 11 FOS/MR name (null for single-MR files)
-    "doctor_name_raw",    # 12 doctor name (null if not present)
+    "mr_name_raw",        # 11 FOS/MR/SalesMan/TERRITORY name (null if absent)
+    "doctor_name_raw",    # 12 doctor name (null / "GENERAL" → null)
+    "free_value_raw",     # 13 value of free goods if a separate column exists
 ]
+
+# The LLM now returns named-key OBJECTS (not positional arrays), which removes the
+# whole class of "value landed in the wrong slot" bugs. This maps the model's keys
+# (and a few common aliases / the internal names themselves) → internal fields.
+_KEY_ALIASES = {
+    "product_name": "product_name_raw", "product": "product_name_raw",
+    "item": "product_name_raw", "product_name_raw": "product_name_raw",
+    "sale_date": "sale_date", "date": "sale_date",
+    "sale_qty": "sale_qty", "qty": "sale_qty", "quantity": "sale_qty", "sales": "sale_qty",
+    "free_qty": "free_qty", "free": "free_qty", "f_qty": "free_qty",
+    "mrp": "mrp",
+    "rate": "ptr", "ptr": "ptr", "sale_rate": "ptr",
+    "amount": "reported_amount", "value": "reported_amount",
+    "sale_value": "reported_amount", "reported_amount": "reported_amount",
+    "free_value": "free_value_raw", "fr_value": "free_value_raw",
+    "free_amount": "free_value_raw", "free_value_raw": "free_value_raw",
+    "bill_ref": "bill_ref", "bill": "bill_ref", "bill_no": "bill_ref",
+    "invoice": "bill_ref", "inv_no": "bill_ref",
+    "batch": "batch", "batch_no": "batch",
+    "pack": "pack", "packing": "pack",
+    "customer_name": "customer_name_raw", "customer": "customer_name_raw",
+    "party": "customer_name_raw", "customer_name_raw": "customer_name_raw",
+    "mr_name": "mr_name_raw", "mr": "mr_name_raw", "fso": "mr_name_raw",
+    "fso_name": "mr_name_raw", "territory": "mr_name_raw", "mr_name_raw": "mr_name_raw",
+    "doctor_name": "doctor_name_raw", "doctor": "doctor_name_raw",
+    "dr_name": "doctor_name_raw", "doctor_name_raw": "doctor_name_raw",
+}
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -78,6 +106,9 @@ class LLMParseResponse:
     # as `extraction_warnings` on the import job so they know which chunk(s)
     # produced no rows.
     warnings: list[str] = field(default_factory=list)
+    # Month the report covers (YYYY-MM), read by the LLM from the title/header.
+    # Used to fill sale_date for rows that have no per-row date.
+    report_month: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -85,52 +116,97 @@ class LLMParseResponse:
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are a data extraction assistant for a pharmaceutical CRM.
-Extract every secondary sale transaction row from the provided distributor sales report.
+You are a data extraction assistant for a pharmaceutical CRM. You are given one
+distributor's secondary-sales report in SOME layout — an Excel/CSV sheet rendered
+as text, or a PDF rendered as markdown / HTML tables. Column names, column order,
+header row position, and overall structure VARY by distributor and even month to
+month for the same distributor. Read the content intelligently and map it to the
+fixed schema below. Never assume a specific column order — identify each column by
+its header text and the kind of values beneath it.
 
-Return JSON: {"rows": [[col0, col1, ..., col12], ...]}
+Return JSON: {"report_month": "YYYY-MM" | null, "rows": [ {row-object}, ... ]}
 
-Column order — exactly 13 values per row:
-  0  product_name     exact product name string from the file
-  1  sale_date        date as YYYY-MM-DD; null if absent
-  2  sale_qty         numeric quantity sold (can be negative for sale-returns); null if absent
-  3  free_qty         numeric free quantity; 0 if absent
-  4  mrp              decimal MRP; null if absent
-  5  ptr              decimal Rate / selling price; null if absent
-  6  reported_amount  decimal Amount / Value total as reported; null if absent
-  7  bill_ref         bill/invoice reference string; null if absent
-  8  batch            batch number string; null if absent
-  9  pack             pack size/form e.g. "1X10TA"; null if absent
-  10 customer_name    exact party / store name from the file; null if absent
-  11 mr_name          FOS / MR name from the file; null if not present per-row
-  12 doctor_name      doctor name from the file; null if not present
+report_month — the month the report covers, as YYYY-MM. Read it from the title or
+header text (e.g. "From: 01/01/2026 To: 31/01/2026", "JAN-26", "Sales Report Jan
+2026"). It is used as the sale month for rows that have no own date. null only if
+truly indeterminable.
 
-Input may be plain text, markdown pipe-tables, or HTML `<table>` blocks.
+Each row is a JSON OBJECT keyed by FIELD NAME (not position). Include a key only
+when the file has a value for it; omit it or use null otherwise. Because values
+are keyed by name, map each column to its MEANING regardless of the file's column
+order or how many columns it has — a value can never go in the "wrong slot".
+Keys:
+  "product_name"  the specific drug / ITEM name (e.g. "APTIGLIM M1 PR TAB"),
+                  NOT a manufacturer / company / division name (e.g.
+                  "APTUS CD CARE", "… DIVI", "MF: …"). If a row carries BOTH a
+                  manufacturer/division and an item, use the ITEM. If a
+                  continuation row leaves it blank but clearly belongs to the
+                  product above (different batch / invoice), carry it down.
+  "sale_date"     that row's date as YYYY-MM-DD. Omit if the file has NO per-row
+                  date column (many monthly summaries don't). Do NOT invent one.
+  "sale_qty"      quantity SOLD (paid). Synonyms: Qty, Sale Qty, SaleQty, Sales.
+                  Numeric; NEGATIVE for sale-returns; MAY be fractional (e.g. 2.5).
+                  This is NOT "Total Qty" (= sale + free) and NOT the free column.
+                  DISAMBIGUATION: if there are two quantity-like columns, ARITHMETIC
+                  decides — the column whose value × rate ≈ amount is sale_qty; the
+                  other is free_qty. This OVERRIDES the column's name (e.g. a
+                  "Qty=10, S.Qty=2, Rate=37.5, Amount=375" row → sale_qty=10,
+                  free_qty=2, because 10×37.5=375).
+  "free_qty"      FREE / scheme quantity. Synonyms: Free, F.Qty, Fqty, F. Qty, Fee,
+                  Sch Qty, S. Qty, FREE QTY. 0 if absent. May be fractional (0.5).
+  "mrp"           MRP (per-unit price). null if absent.
+  "rate"          selling rate per unit. Synonyms: Rate, Sale Rate, S. Rate, PTR.
+  "amount"        the sale LINE total (≈ qty × rate). Synonyms: Amount, Value, Sale
+                  Amount, NetSales, FinalAmt, Total Value. This is NOT a per-unit
+                  price — keep it separate from "mrp" and "rate". A file with a
+                  single money column maps it to "amount".
+  "free_value"    value of the free goods, only if a separate column exists.
+                  Synonyms: Fr.Value, Free Amount, FrQty Amt.
+  "bill_ref"      bill / invoice / challan no. Synonyms: BillRef, InvNo, Bill No.
+  "batch"         batch / lot no.
+  "pack"          pack size/form e.g. "10 TAB", "1X10".
+  "customer_name" the PARTY / medical store / dealer the sale is to.
+  "mr_name"       field officer / MR / sales rep. Synonyms: FSO, Fso name, MR, Rep,
+                  SalesMan, TERRITORY.
+  "doctor_name"   the doctor. Synonyms: Dr name, DR NAME, RXBER. "GENERAL" → null.
 
-HTML table format (typical distributor report output):
-- Each PDF page is one `<table>...</table>` block.
-- The FIRST `<tr>` of every table is the column-header row, e.g.:
-    <tr><td>Product</td><td>Pack</td><td>BillRef</td><td>Date</td>
-        <td>MRP Batch</td><td>Qty</td><td>Free</td><td>Rate</td><td>Amount</td></tr>
-  Use this header row to identify which `<td>` cell maps to which output column.
-- A `<tr>` whose only cell is `<td colspan="9">CUSTOMER NAME, CITY, CITY</td>` is a
-  customer-section header — NOT a data row. Use its text as the customer_name for
-  every subsequent data row in that table, until another colspan customer-section
-  row appears.
-- The "MRP Batch" cell often contains BOTH the MRP and the batch number separated
-  by a space (e.g. "84.23 CGX03AGA") — split it: numeric → mrp (col 4),
-  remainder → batch (col 8).
-- Rows like `Party Total ->`, `Grand Total`, `Page Total` are subtotals — SKIP them.
+Example row object:
+  {"product_name": "APTIGLIM M2 SR TAB", "sale_qty": 5, "free_qty": 1,
+   "rate": 64.18, "amount": 320.9, "bill_ref": "CA-T/28305", "batch": "CGX03AGA",
+   "pack": "10 TAB", "customer_name": "SHIV MEDICARE", "sale_date": "2026-01-15"}
 
-Rules:
-- Skip subtotal rows ("Party Total", "Grand Total", "Customer Total") and page headers.
-- If a customer section header introduces a block of rows for one customer, repeat
-  that customer name in column 10 of every row in that block.
-- Parse all date formats to YYYY-MM-DD (input may be D/M/YYYY, DD-MM-YYYY, etc.).
-- Numbers may use comma thousand-separators — parse them as plain decimals.
-- Negative quantities indicate sale-returns (bill refs often contain "SR") — keep
-  them as negative numbers; do NOT drop them and do NOT make them positive.
-- Do NOT invent data. Only extract what is explicitly present in the file.\
+Structure rules — handle ALL of these layouts:
+- The customer/party may be (a) an inline column on every row, OR (b) a SECTION
+  HEADER that introduces a block — e.g. "Party: ABC STORE [CITY]", a standalone
+  bold name line, a `<td colspan=...>NAME, CITY</td>` row, OR (very common in
+  spreadsheets) a row whose FIRST column holds a store/party name while the
+  Qty/Free/Amount columns are EMPTY (often with just a city/area in another
+  column, e.g. "DAWA ZONE MEDICAL & FOODS , , , JAMNAGAR"). Such a name-only row
+  is a CUSTOMER section header — NOT a product — and its customer_name applies to
+  EVERY following data row until the next section header. Each product line under
+  it (which DOES have a qty/amount) must carry that customer_name.
+  If the section header spans MULTIPLE lines — a party NAME line followed by an
+  ADDRESS line (street / road / building / room / plot / shop-no / city, e.g.
+  "MKT-2303.ROOM-1.…, COLLEGE RD.BILIMOR") — use the NAME line as customer_name
+  and IGNORE the address line. The name often carries a leading account code
+  (e.g. "3619 KAIZENS …"); keep the full name line as-is, code included.
+- mr_name and doctor_name may likewise appear once on a section row or a
+  "Party Total" row rather than on each data row — apply them to that party's rows.
+- One cell may merge two fields (e.g. "MRP Batch" = "84.23 CGX03"; or "Qty Free" /
+  "Rate Amount" sharing one header) — split on whitespace into the correct columns.
+- SKIP non-transaction rows: "Party Total", "Grand Total", "Page Total",
+  "1. Invoice", "Sum of …", "Row Labels", and manufacturer/company section rows
+  ("MF : …", a company name with no quantities).
+- Input may contain multiple sheets separated by a "### SHEET: <name>" marker —
+  extract from every sheet.
+- Parse all date formats to YYYY-MM-DD (D/M/YYYY, DD-MM-YYYY, etc.). Numbers may
+  use comma thousand-separators — parse as plain decimals.
+- Negative quantities = sale-returns (bill refs often contain "SR") — keep them
+  negative; do NOT drop or flip them.
+- A file may have FEWER columns than these keys (e.g. only Item, Qty, F.Qty,
+  Amount). Just emit the keys you have values for and omit the rest — order and
+  count don't matter since rows are keyed by name.
+- Do NOT invent data. Only extract what is present; leave unknown fields null.\
 """
 
 
@@ -756,7 +832,7 @@ def _call_gemini_chunked(
     )
     n = len(chunks)
 
-    def _do_one(idx: int, chunk_text: str) -> tuple[int, list, Exception | None]:
+    def _do_one(idx: int, chunk_text: str) -> tuple[int, list, str | None, Exception | None]:
         chunk_prefix = f"{log_prefix}[c{idx + 1}/{n}]"
         # Log first/last 200 chars so we can see exactly what each chunk
         # contains and verify the splitter cut at safe boundaries.
@@ -799,13 +875,14 @@ def _call_gemini_chunked(
                 rows = parsed.get("rows", []) if isinstance(parsed, dict) else []
                 if not isinstance(rows, list):
                     rows = []
+                month = parsed.get("report_month") if isinstance(parsed, dict) else None
                 logger.info(
                     "%s gemini ok response_chars=%d rows=%d "
                     "attempt_ms=%.0f total_ms=%.0f",
                     chunk_prefix, len(response_text), len(rows),
                     attempt_ms, (time.perf_counter() - t_chunk) * 1000,
                 )
-                return idx, rows, None
+                return idx, rows, month, None
 
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
@@ -828,7 +905,7 @@ def _call_gemini_chunked(
                     )
                     break
 
-        return idx, [], last_exc
+        return idx, [], None, last_exc
 
     logger.info(
         "%s gemini-chunked: starting n=%d sizes=%s",
@@ -851,8 +928,9 @@ def _call_gemini_chunked(
 
     combined: list = []
     warnings: list[str] = []
+    report_month: str | None = None
     failed_count = 0
-    for idx, rows, err in results:
+    for idx, rows, month, err in results:
         if err is not None:
             failed_count += 1
             warnings.append(
@@ -862,6 +940,8 @@ def _call_gemini_chunked(
             )
         else:
             combined.extend(rows)
+            if report_month is None and month:
+                report_month = month
 
     total_ms = (time.perf_counter() - t_total) * 1000
     logger.info(
@@ -872,11 +952,11 @@ def _call_gemini_chunked(
     if failed_count == n:
         # All chunks failed — propagate the first error so the OpenAI fallback
         # in parse_with_llm gets a chance.
-        first_err = next((e for _, _, e in results if e is not None), None)
+        first_err = next((e for _, _, _, e in results if e is not None), None)
         assert first_err is not None
         raise first_err
 
-    return combined, warnings
+    return combined, warnings, report_month
 
 
 # ---------------------------------------------------------------------------
@@ -1018,15 +1098,12 @@ def _is_junk_row(d: dict) -> bool:
     when processing a document chunk without full-document context (e.g.
     "Party Total ->", "Grand Total", customer-section header rows).
 
-    A real sales row MUST have a product name, a sale date, and a sale qty.
-    If any of these three is missing/empty, the row cannot be a valid sale
-    and the validator would reject it anyway — so we drop it deterministically
-    here to keep the row count honest and the error histogram meaningful.
+    A real sales row MUST have a product name and a sale qty. (A missing date is
+    NO LONGER junk: monthly-summary reports have no per-row date — those rows get
+    the report month filled in downstream, so we must keep them here.)
     """
     product = d.get("product_name_raw")
     if not isinstance(product, str) or not product.strip():
-        return True
-    if d.get("sale_date") in (None, "", "null"):
         return True
     qty = d.get("sale_qty")
     if qty is None or qty == "" or qty == "null":
@@ -1045,8 +1122,14 @@ def _rows_to_dicts(raw_rows: list) -> list[dict]:
     for row in raw_rows:
         d: dict | None = None
         if isinstance(row, dict):
-            d = dict(row)
+            # Named-object output: map the model's keys → internal field names.
+            d = {}
+            for k, v in row.items():
+                internal = _KEY_ALIASES.get(str(k).strip().lower())
+                if internal and (internal not in d or d[internal] in (None, "")):
+                    d[internal] = v
         elif isinstance(row, (list, tuple)):
+            # Legacy positional-array fallback (kept for safety).
             d = {}
             for i, col in enumerate(_COLUMNS):
                 d[col] = row[i] if i < len(row) else None
@@ -1142,6 +1225,7 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
     raw_rows: list = []
     model_used = ""
     chunk_warnings: list[str] = []
+    report_month: str | None = None
     pre_dedupe_count = 0
     actual_chunks_used = 1
 
@@ -1174,27 +1258,21 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
                     raw_rows = raw.get("rows", []) if isinstance(raw, dict) else []
                     if not isinstance(raw_rows, list):
                         raw_rows = []
+                    report_month = raw.get("report_month") if isinstance(raw, dict) else None
                 else:
                     actual_chunks_used = len(chunks)
-                    raw_rows, chunk_warnings = _call_gemini_chunked(
+                    raw_rows, chunk_warnings, report_month = _call_gemini_chunked(
                         chunks,
                         detected_fos_name=effective_req.detected_fos_name,
                         log_prefix=log_prefix,
                     )
-                    pre_dedupe_count = len(raw_rows)
-                    raw_rows, removed = _dedupe_rows(raw_rows)
-                    if removed:
-                        logger.info(
-                            "%s parse_with_llm: dedupe removed %d duplicate row(s) "
-                            "across chunks (kept %d)",
-                            log_prefix, removed, len(raw_rows),
-                        )
                     model_used = _GEMINI_MODEL
             else:
                 raw, model_used = _call_gemini(effective_req)
                 raw_rows = raw.get("rows", []) if isinstance(raw, dict) else []
                 if not isinstance(raw_rows, list):
                     raw_rows = []
+                report_month = raw.get("report_month") if isinstance(raw, dict) else None
         except Exception as exc:  # noqa: BLE001
             _gemini_error = exc
             logger.warning(
@@ -1208,6 +1286,7 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
             raw_rows = raw.get("rows", []) if isinstance(raw, dict) else []
             if not isinstance(raw_rows, list):
                 raw_rows = []
+            report_month = raw.get("report_month") if isinstance(raw, dict) else None
         except Exception as exc:
             logger.error(
                 "%s parse_with_llm: OpenAI fallback also failed (%s: %s)",
@@ -1223,6 +1302,18 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
                 f"Gemini call failed: {type(_gemini_error).__name__}: {_gemini_error}"
             ) from _gemini_error
         raise RuntimeError("LLM call returned no model_used (unknown reason)")
+
+    # Dedupe across ALL paths (single-call tabular/PDF + chunked). The model
+    # occasionally emits the same invoice line twice; without this it inflates
+    # qty/amount. Conservative: only drops a row when its full identity
+    # (date, customer, product, qty, bill_ref) is present and matches exactly.
+    pre_dedupe_count = len(raw_rows)
+    raw_rows, removed = _dedupe_rows(raw_rows)
+    if removed:
+        logger.info(
+            "%s parse_with_llm: dedupe removed %d duplicate row(s) (kept %d)",
+            log_prefix, removed, len(raw_rows),
+        )
 
     rows = _rows_to_dicts(raw_rows)
 
@@ -1240,4 +1331,5 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
         model_used=model_used,
         raw_response={"rows": raw_rows},
         warnings=chunk_warnings,
+        report_month=report_month,
     )

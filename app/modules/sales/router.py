@@ -321,9 +321,9 @@ async def commit_import_job(
             str(current.id)[:8], short, str(job.uploaded_by)[:8],
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your import job")
-    if job.status not in (ImportJobStatus.ready, ImportJobStatus.committed):
+    if job.status not in (ImportJobStatus.ready, ImportJobStatus.partial):
         logger.warning(
-            "commit_import_job: rejected — job=%s not ready (status=%s)",
+            "commit_import_job: rejected — job=%s not committable (status=%s)",
             short, job.status,
         )
         raise HTTPException(

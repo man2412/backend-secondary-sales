@@ -148,14 +148,17 @@ async def validate_rows(
             errors.append(f"sale_date: cannot parse {row.get('sale_date')!r}")
         row["sale_date"] = sale_date.isoformat() if sale_date else None
 
-        # --- sale_qty (required) ---
-        qty = _parse_int(row.get("sale_qty"))
-        if qty is None or qty < 0:
+        # --- sale_qty (required; MAY be fractional, e.g. 2.5, and negative for
+        #     sales-returns, e.g. a bill ref containing 'SR'). Parse as a decimal
+        #     and DO NOT floor — distributors sell half-units. Only a
+        #     missing/unparseable value is invalid. ---
+        qty = _parse_float(row.get("sale_qty"))
+        if qty is None:
             errors.append(f"sale_qty: invalid value {row.get('sale_qty')!r}")
         row["sale_qty"] = qty
 
-        # --- free_qty (optional, default 0) ---
-        row["free_qty"] = _parse_int(row.get("free_qty")) or 0
+        # --- free_qty (optional, default 0; also may be fractional like 0.5) ---
+        row["free_qty"] = _parse_float(row.get("free_qty")) or 0
 
         # --- numeric optionals ---
         row["mrp"] = _parse_float(row.get("mrp"))

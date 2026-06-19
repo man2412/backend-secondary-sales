@@ -30,8 +30,11 @@ class SecondarySale(Base, TimestampMixin):
     )
     state_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("states.id"), nullable=False)
     sale_date: Mapped[date] = mapped_column(Date, nullable=False)
-    sale_qty: Mapped[int] = mapped_column(Integer, nullable=False)
-    free_qty: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Numeric (not Integer): distributors sell fractional units (e.g. 2.5 / 0.5).
+    # Stored as decimals so totals and total_amount (= qty × rate) match the
+    # source files exactly. Existing whole-number rows are unaffected (5 → 5.00).
+    sale_qty: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    free_qty: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     ptr: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     pts: Mapped[float | None] = mapped_column(Numeric(10, 2))
     mrp: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
