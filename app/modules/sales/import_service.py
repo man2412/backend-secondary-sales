@@ -639,6 +639,13 @@ class ImportService:
             )
 
         skipped_rows: list[dict] = []
+        # Rows the client asked to skip that are nevertheless fully valid after
+        # server-side re-validation (have product/store/MR ids + is_valid). This
+        # is the signature of the preview-UI bug where a newly-added row keeps its
+        # initial `skip=true` even after the user fills every field. We still honor
+        # the skip (a deliberate user skip must never auto-commit), but surface
+        # these loudly so the omission is never silent.
+        valid_rows_skipped: list[dict] = []
         # Accumulate insertable rows and emit a single bulk INSERT at the end —
         # replaces 1 INSERT per row with 1 multi-row INSERT.
         sale_values: list[dict] = []
@@ -659,7 +666,27 @@ class ImportService:
                 })
 
             if row.get("skip"):
-                _skip("row marked skip=true")
+                # Safeguard: a skipped row that would otherwise commit cleanly is
+                # almost always the preview-UI bug (stale skip flag on a filled-in
+                # new row), not a deliberate exclusion. Honor the skip, but flag it.
+                if (
+                    row.get("is_valid")
+                    and row.get("product_id")
+                    and row.get("medical_store_id")
+                    and row.get("mr_id")
+                ):
+                    valid_rows_skipped.append({
+                        "row_index": idx,
+                        "product_name_raw": row.get("product_name_raw"),
+                        "customer_name_raw": row.get("customer_name_raw"),
+                        "reported_amount": row.get("reported_amount"),
+                    })
+                    _skip(
+                        "row marked skip=true but is fully valid — not committed. "
+                        "If this was unintentional, clear the skip flag in preview."
+                    )
+                else:
+                    _skip("row marked skip=true")
                 continue
             if not row.get("is_valid"):
                 skip_reason_hist["validation failure"] += 1
@@ -746,6 +773,13 @@ class ImportService:
             len(chain_cache), loop_ms,
             dict(skip_reason_hist) if skip_reason_hist else {},
         )
+        if valid_rows_skipped:
+            logger.warning(
+                "%s commit_job: %d fully-valid row(s) were skipped (skip=true). "
+                "Likely the preview-UI stale-skip bug. row_index values: %s",
+                prefix, len(valid_rows_skipped),
+                [r["row_index"] for r in valid_rows_skipped][:40],
+            )
 
         committed = len(sale_values)
         if sale_values:
@@ -782,6 +816,7 @@ class ImportService:
             "skipped": len(skipped_rows),
             "total": len(validated),
             "skipped_rows": skipped_rows,
+            "valid_rows_skipped": valid_rows_skipped,
             "status": job.status.value if hasattr(job.status, "value") else str(job.status),
         }
 

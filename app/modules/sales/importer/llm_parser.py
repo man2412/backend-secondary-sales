@@ -191,12 +191,38 @@ Structure rules — handle ALL of these layouts:
   and IGNORE the address line. The name often carries a leading account code
   (e.g. "3619 KAIZENS …"); keep the full name line as-is, code included.
 - mr_name and doctor_name may likewise appear once on a section row or a
-  "Party Total" row rather than on each data row — apply them to that party's rows.
+  "Party Total" / "Company Total" row rather than on each data row — apply them to
+  that party's rows.
+- A CUSTOMER (party) section header and a MANUFACTURER/COMPANY section header are
+  DIFFERENT things and are often STACKED: the party name sits in the FIRST column
+  (e.g. "CA022-PARAS CHEMIST [ANK]-ANKLESHWAR-ANKLESHWAR"), and the very next row is
+  a company/division header whose name sits in a LATER column (e.g. ",0397-APTUS
+  PHARMA (CD CARE),,,…"). The company header does NOT introduce a new customer and
+  does NOT reset it — SKIP it, but KEEP the current customer_name. customer_name is
+  reset ONLY by the next FIRST-COLUMN party name. So every data row beneath BOTH
+  headers (even though its own Party and Company columns are blank) must carry the
+  party name from the first-column header above. Never emit a row with a null
+  customer_name when a first-column party header preceded it.
 - One cell may merge two fields (e.g. "MRP Batch" = "84.23 CGX03"; or "Qty Free" /
   "Rate Amount" sharing one header) — split on whitespace into the correct columns.
 - SKIP non-transaction rows: "Party Total", "Grand Total", "Page Total",
-  "1. Invoice", "Sum of …", "Row Labels", and manufacturer/company section rows
-  ("MF : …", a company name with no quantities).
+  "Company Total", any row whose label is wrapped in marker braces like
+  "z{{{ Company Total }}}" / "z{{{ Party Total }}}", "1. Invoice", "Sum of …",
+  "Row Labels", and manufacturer/company section rows ("MF : …", a company name
+  with no quantities). When such a total row carries an MR (TERRITORY) and doctor
+  (RXBER), apply them to the data rows of the party it summarizes, then drop the
+  total row itself.
+  Worked example (party header, then company header, then two data rows, then a
+  company-total row that holds the MR + doctor):
+    CA022-PARAS CHEMIST [ANK]-ANKLESHWAR-ANKLESHWAR,,,,,,,,,,,,,,,,,,
+    ,0397-APTUS PHARMA (CD CARE),,,,,,,,,,,,,,,,,
+    ,,015106-APTIGLIM M 1 PR TAB,,Tablate,,BQG04AAA,30/09/2027,10,0,0,0,61.36,613.6,613.6,0,,,
+    ,,z{{{ Company Total }}},,,,,,10,1,0,0,0,613.6,613.6,0,UTSAV PATEL,DR HARSHAD GAMBHVA,0.1
+  → emit ONE data row: {"product_name": "APTIGLIM M 1 PR TAB",
+    "customer_name": "CA022-PARAS CHEMIST [ANK]-ANKLESHWAR-ANKLESHWAR",
+    "mr_name": "UTSAV PATEL", "doctor_name": "DR HARSHAD GAMBHVA",
+    "sale_qty": 10, "free_qty": 0, "reported_amount": 613.6}
+  (the company header and the z{{{ Company Total }}} row are NOT emitted).
 - Input may contain multiple sheets separated by a "### SHEET: <name>" marker —
   extract from every sheet.
 - Parse all date formats to YYYY-MM-DD (D/M/YYYY, DD-MM-YYYY, etc.). Numbers may
@@ -574,6 +600,132 @@ def _split_markdown_into_chunks(text: str, n: int) -> list[str]:
         return chunks_fb
 
     return [text]
+
+
+# Tabular (CSV/XLSX) chunking thresholds. Tabular text is NOT heading-structured
+# like MinerU markdown, so it uses a dedicated splitter (below) and only chunks
+# when the file is large enough that a single call's JSON OUTPUT would risk
+# truncation (the failure mode: a ~660-row distributor .xls produces a JSON
+# response that exceeds the output-token budget and is cut off mid-string →
+# JSONDecodeError → 0 rows). Small tabular files stay single-call (no regression).
+#
+# Trigger is set ABOVE every distributor file that already imports correctly in a
+# single call (the largest known-good tabular file is ~31k chars; ROYAL — the only
+# file that overflows a single call — is 41k–74k). This guarantees NO file that
+# works today changes code path: anything < 35k still takes the identical
+# single-call branch. Only files that genuinely cannot fit one response get chunked.
+_TABULAR_CHUNK_TRIGGER_CHARS = 35_000
+_TABULAR_CHUNK_TARGET_CHARS = 25_000
+_TABULAR_CHUNK_MAX = 8
+
+
+def _split_tabular_into_chunks(text: str, n: int) -> list[str]:
+    """
+    Split flat CSV/XLSX text (NOT MinerU markdown) into `n` safe parallel chunks,
+    repeating the preamble (title rows + column-header row) at the top of every
+    chunk so each chunk has full column context.
+
+    Boundaries are chosen at PARTY/CUSTOMER section-header rows so a party's data
+    rows — and its trailing "Party Total" row (which often carries the MR/doctor)
+    — are never split across chunks. A section header is a row with a non-empty
+    FIRST column, very few non-empty cells, a non-numeric first cell, and no
+    "total/grand/page" keyword (e.g. `"AADINATH MEDICINES(PAL), PAL ADAJAN, SURAT"`).
+
+    If the file has NO section headers (inline-customer layout where every row is
+    self-contained), it falls back to splitting between any data rows — safe
+    because each row already carries its own customer.
+
+    Returns [text] unchanged when it cannot split safely (caller uses single call).
+    """
+    if n <= 1 or not text:
+        return [text] if text else []
+
+    lines = text.splitlines(keepends=True)
+    if len(lines) < n * 2:
+        return [text]
+
+    def _cells(ln: str) -> list[str]:
+        out, cur, in_q = [], [], False
+        for ch in ln.rstrip("\r\n"):
+            if ch == '"':
+                in_q = not in_q
+            elif ch == "," and not in_q:
+                out.append("".join(cur)); cur = []
+            else:
+                cur.append(ch)
+        out.append("".join(cur))
+        return out
+
+    def _is_number(s: str) -> bool:
+        try:
+            float(s.replace(",", "").strip())
+            return True
+        except ValueError:
+            return False
+
+    # 1. Locate the column-header row: first row (scanning the top) that names a
+    #    quantity column AND an amount/value/rate column.
+    header_idx = None
+    for i, ln in enumerate(lines[:40]):
+        low = ln.lower()
+        if "qty" in low and any(k in low for k in ("amount", "value", "rate", "net")):
+            header_idx = i
+            break
+    if header_idx is None:
+        return [text]
+
+    preamble = "".join(lines[: header_idx + 1])
+    data_start = header_idx + 1
+    data_lines = lines[data_start:]
+    if len(data_lines) < n * 2:
+        return [text]
+
+    cum: list[int] = [0]
+    for ln in data_lines:
+        cum.append(cum[-1] + len(ln))
+
+    def _is_section_header(ln: str) -> bool:
+        cells = _cells(ln)
+        if not cells or not cells[0].strip():
+            return False
+        nonempty = [c for c in cells if c.strip()]
+        if len(nonempty) > 3:
+            return False
+        first = cells[0].strip()
+        low = first.lower()
+        if any(k in low for k in ("total", "grand", "page", "sum of", "row labels")):
+            return False
+        return not _is_number(first)
+
+    section_idxs = [i for i, ln in enumerate(data_lines) if i > 0 and _is_section_header(ln)]
+
+    if section_idxs:
+        n_eff = min(n, len(section_idxs) + 1)
+        candidates = section_idxs
+    else:
+        candidates = [i for i, ln in enumerate(data_lines) if i > 0 and ln.strip()]
+        n_eff = n
+    if n_eff <= 1 or len(candidates) < n_eff - 1:
+        return [text]
+
+    boundaries = _balance_boundaries(candidates, n_eff, cum)
+    if not boundaries:
+        return [text]
+
+    out: list[str] = []
+    prev = 0
+    for b in boundaries:
+        out.append(preamble + "".join(data_lines[prev:b]))
+        prev = b
+    out.append(preamble + "".join(data_lines[prev:]))
+    out = [c for c in out if c.strip() and len(c) > len(preamble)]
+    if len(out) < 2:
+        return [text]
+    logger.info(
+        "split: tabular produced %d chunks (sections=%d, data_rows=%d, preamble_chars=%d)",
+        len(out), len(section_idxs), len(data_lines), len(preamble),
+    )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1222,6 +1374,28 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
         and len(effective_req.raw_text or "") >= settings.IMPORT_CHUNK_MIN_CHARS
     )
 
+    # Large FLAT tabular text (CSV/XLSX, not MinerU markdown, not binary PDF) is
+    # chunked too — but only above a higher trigger, because the risk being
+    # mitigated is JSON OUTPUT truncation on big files (a single call on a
+    # ~660-row .xls overflows the output-token budget → truncated JSON → 0 rows).
+    # Small tabular files keep using a single call (no behavioural change).
+    _tab_len = len(effective_req.raw_text or "")
+    tabular_can_chunk = (
+        not effective_req.is_pdf
+        and not came_from_mineru
+        and settings.IMPORT_CHUNK_COUNT > 1
+        and _tab_len >= _TABULAR_CHUNK_TRIGGER_CHARS
+    )
+    # Scale chunk count so each chunk is ~_TABULAR_CHUNK_TARGET_CHARS, never fewer
+    # than the configured count, capped to keep fan-out bounded.
+    tabular_chunk_n = min(
+        _TABULAR_CHUNK_MAX,
+        max(
+            settings.IMPORT_CHUNK_COUNT,
+            (_tab_len + _TABULAR_CHUNK_TARGET_CHARS - 1) // _TABULAR_CHUNK_TARGET_CHARS,
+        ),
+    )
+
     raw_rows: list = []
     model_used = ""
     chunk_warnings: list[str] = []
@@ -1253,6 +1427,30 @@ def parse_with_llm(req: LLMParseRequest) -> LLMParseResponse:
                         "Falling back to single call — accuracy preserved.",
                         log_prefix, len(md), heading_count,
                         table_row_count, settings.IMPORT_CHUNK_COUNT,
+                    )
+                    raw, model_used = _call_gemini(effective_req)
+                    raw_rows = raw.get("rows", []) if isinstance(raw, dict) else []
+                    if not isinstance(raw_rows, list):
+                        raw_rows = []
+                    report_month = raw.get("report_month") if isinstance(raw, dict) else None
+                else:
+                    actual_chunks_used = len(chunks)
+                    raw_rows, chunk_warnings, report_month = _call_gemini_chunked(
+                        chunks,
+                        detected_fos_name=effective_req.detected_fos_name,
+                        log_prefix=log_prefix,
+                    )
+                    model_used = _GEMINI_MODEL
+            elif tabular_can_chunk:
+                chunks = _split_tabular_into_chunks(
+                    effective_req.raw_text or "", tabular_chunk_n,
+                )
+                if len(chunks) <= 1:
+                    logger.warning(
+                        "%s parse_with_llm: tabular chunking SKIPPED (could not "
+                        "split safely) — chars=%d requested_chunks=%d. Single "
+                        "call may truncate on very large files.",
+                        log_prefix, _tab_len, tabular_chunk_n,
                     )
                     raw, model_used = _call_gemini(effective_req)
                     raw_rows = raw.get("rows", []) if isinstance(raw, dict) else []

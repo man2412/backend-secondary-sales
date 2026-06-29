@@ -357,6 +357,7 @@ async def commit_import_job(
 
     committed = summary["committed"]
     skipped = summary["skipped"]
+    valid_skipped = len(summary.get("valid_rows_skipped") or [])
     if committed == 0:
         message = (
             f"No sales were committed. {skipped} row(s) skipped — "
@@ -366,6 +367,11 @@ async def commit_import_job(
         message = f"{committed} sale(s) committed, {skipped} skipped — see skipped_rows."
     else:
         message = f"{committed} sale(s) committed successfully."
+    if valid_skipped:
+        message += (
+            f" ⚠ {valid_skipped} fully-valid row(s) were skipped because skip=true — "
+            f"if unintended, clear the skip flag and re-commit (see valid_rows_skipped)."
+        )
 
     return ok(
         data={"job_id": str(job_id), **summary},
