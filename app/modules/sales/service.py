@@ -166,6 +166,10 @@ class SalesService:
         per_page: int,
         sale_date: date | None,
         mr_id_filter: uuid.UUID | None,
+        doctor_id_filter: uuid.UUID | None = None,
+        product_id_filter: uuid.UUID | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
         include_inactive: bool,
     ) -> tuple[list[dict], int]:
         # `visible` is still used to validate the optional mr_id_filter and as
@@ -187,7 +191,11 @@ class SalesService:
             caller_role=user.role,
             fallback_mr_ids=list(visible),
             mr_id_filter=mr_id_filter,
+            doctor_id_filter=doctor_id_filter,
+            product_id_filter=product_id_filter,
             sale_date=sale_date,
+            date_from=date_from,
+            date_to=date_to,
             active_only=not include_inactive,
             limit=per_page,
             offset=offset,

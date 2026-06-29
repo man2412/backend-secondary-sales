@@ -41,6 +41,10 @@ async def list_secondary_sales(
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     sale_date: Annotated[date | None, Query()] = None,
     mr_id: Annotated[UUID | None, Query()] = None,
+    doctor_id: Annotated[UUID | None, Query()] = None,
+    product_id: Annotated[UUID | None, Query()] = None,
+    date_from: Annotated[date | None, Query()] = None,
+    date_to: Annotated[date | None, Query()] = None,
     include_inactive: Annotated[bool, Query()] = False,
 ) -> dict:
     try:
@@ -51,6 +55,10 @@ async def list_secondary_sales(
             per_page=per_page,
             sale_date=sale_date,
             mr_id_filter=mr_id,
+            doctor_id_filter=doctor_id,
+            product_id_filter=product_id,
+            date_from=date_from,
+            date_to=date_to,
             include_inactive=include_inactive,
         )
     except PermissionError as e:

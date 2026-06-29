@@ -52,7 +52,11 @@ class SalesRepository:
         caller_role: UserRole,
         fallback_mr_ids: list[uuid.UUID],
         mr_id_filter: uuid.UUID | None,
-        sale_date: date | None,
+        doctor_id_filter: uuid.UUID | None = None,
+        product_id_filter: uuid.UUID | None = None,
+        sale_date: date | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
         active_only: bool,
         limit: int,
         offset: int,
@@ -69,21 +73,32 @@ class SalesRepository:
         base = select(SecondarySale)
         count_q = select(func.count()).select_from(SecondarySale)
 
+        # Collect every filter clause once and apply the identical set to both
+        # the data query and the count query — they must always agree, and any
+        # combination of filters is ANDed together.
+        clauses = []
         rbac_clause = self._build_rbac_clause(caller_id, caller_role, fallback_mr_ids)
         if rbac_clause is not None:
-            base = base.where(rbac_clause)
-            count_q = count_q.where(rbac_clause)
-
+            clauses.append(rbac_clause)
         if mr_id_filter is not None:
-            base = base.where(SecondarySale.mr_id == mr_id_filter)
-            count_q = count_q.where(SecondarySale.mr_id == mr_id_filter)
-
+            clauses.append(SecondarySale.mr_id == mr_id_filter)
+        if doctor_id_filter is not None:
+            clauses.append(SecondarySale.doctor_id == doctor_id_filter)
+        if product_id_filter is not None:
+            clauses.append(SecondarySale.product_id == product_id_filter)
         if sale_date is not None:
-            base = base.where(SecondarySale.sale_date == sale_date)
-            count_q = count_q.where(SecondarySale.sale_date == sale_date)
+            clauses.append(SecondarySale.sale_date == sale_date)
+        if date_from is not None:
+            clauses.append(SecondarySale.sale_date >= date_from)
+        if date_to is not None:
+            clauses.append(SecondarySale.sale_date <= date_to)
         if active_only:
-            base = base.where(SecondarySale.is_active.is_(True))
-            count_q = count_q.where(SecondarySale.is_active.is_(True))
+            clauses.append(SecondarySale.is_active.is_(True))
+
+        for c in clauses:
+            base = base.where(c)
+            count_q = count_q.where(c)
+
         total = (await db.execute(count_q)).scalar_one()
         base = base.order_by(SecondarySale.sale_date.desc(), SecondarySale.created_at.desc())
         base = base.offset(offset).limit(limit)
